@@ -7,8 +7,8 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from config import ADMIN_USER_ID
 from states import ProjectCreation
 from db import (
-    create_project, create_shift, get_shifts_by_project,
-    get_workers, assign_worker, get_shift
+    create_project, create_shift,
+    get_workers, assign_worker
 )
 
 router = Router()
@@ -28,6 +28,7 @@ def admin_only(func):
         return await func(event, *args, **kwargs)
     return wrapper
 
+# ========== АДМИН-ПАНЕЛЬ ==========
 @router.message(Command("admin"))
 @admin_only
 async def admin_panel(message: types.Message):
@@ -36,10 +37,10 @@ async def admin_panel(message: types.Message):
         [InlineKeyboardButton(text="➕ Создать проект", callback_data="admin_create_project")],
         [InlineKeyboardButton(text="📅 Создать смену", callback_data="admin_create_shift")],
         [InlineKeyboardButton(text="👥 Назначить на смену", callback_data="admin_assign")],
-        [InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats")],
     ])
     await message.answer("🔐 *Админ-панель*\n\nВыберите действие:", reply_markup=keyboard, parse_mode="Markdown")
 
+# ========== СПИСОК ИСПОЛНИТЕЛЕЙ ==========
 @router.callback_query(F.data == "admin_workers")
 @admin_only
 async def show_workers(callback: types.CallbackQuery):
@@ -57,13 +58,11 @@ async def show_workers(callback: types.CallbackQuery):
     await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="Markdown")
     await callback.answer()
 
+# ========== СОЗДАНИЕ ПРОЕКТА ==========
 @router.callback_query(F.data == "admin_create_project")
 @admin_only
 async def admin_create_project_start(callback: types.CallbackQuery, state: FSMContext):
-    await callback.message.edit_text(
-        "➕ *Создание проекта*\n\nВведите название проекта:",
-        parse_mode="Markdown"
-    )
+    await callback.message.answer("➕ Введите название проекта:")
     await state.set_state(ProjectCreation.name)
     await callback.answer()
 
@@ -75,6 +74,7 @@ async def admin_create_project_finish(message: types.Message, state: FSMContext)
     await state.clear()
     await admin_panel(message)
 
+# ========== СОЗДАНИЕ СМЕНЫ ==========
 @router.callback_query(F.data == "admin_create_shift")
 @admin_only
 async def admin_create_shift_list_projects(callback: types.CallbackQuery):
@@ -91,7 +91,7 @@ async def admin_create_shift_list_projects(callback: types.CallbackQuery):
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=p[1], callback_data=f"shift_project_{p[0]}")] for p in projects
     ] + [[InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back")]])
-    await callback.message.edit_text("📅 Выберите проект для смены:", reply_markup=keyboard)
+    await callback.message.edit_text("📅 Выберите проект:", reply_markup=keyboard)
     await callback.answer()
 
 @router.callback_query(F.data.startswith("shift_project_"))
@@ -101,8 +101,7 @@ async def admin_create_shift_form(callback: types.CallbackQuery, state: FSMConte
     await state.update_data(project_id=project_id)
     await state.set_state("shift_data")
     await callback.message.edit_text(
-        "📅 *Создание смены*\n\n"
-        "Введите данные в формате:\n"
+        "📅 Введите данные смены:\n"
         "`ДД.ММ.ГГГГ | ЧЧ:ММ | ЧЧ:ММ | Адрес | Ставка`\n\n"
         "*Пример:* `15.05.2026 | 10:00 | 18:00 | ТЦ Европейский | 500`",
         parse_mode="Markdown"
@@ -124,10 +123,11 @@ async def admin_create_shift_finish(message: types.Message, state: FSMContext):
         })
         await message.answer(f"✅ Смена создана! ID: {shift_id}")
     except Exception as e:
-        await message.answer(f"❌ Ошибка формата: {e}")
+        await message.answer(f"❌ Ошибка: {e}")
     await state.clear()
     await admin_panel(message)
 
+# ========== НАЗНАЧЕНИЕ НА СМЕНУ ==========
 @router.callback_query(F.data == "admin_assign")
 @admin_only
 async def admin_assign_list_shifts(callback: types.CallbackQuery):
@@ -135,7 +135,7 @@ async def admin_assign_list_shifts(callback: types.CallbackQuery):
     conn = sqlite3.connect("promostaff_demo.db")
     cur = conn.cursor()
     cur.execute("""
-        SELECT s.id, s.shift_date, s.start_time, s.end_time, s.location, p.name 
+        SELECT s.id, s.shift_date, s.start_time, s.end_time, p.name 
         FROM shifts s JOIN projects p ON s.project_id = p.id
         ORDER BY s.shift_date DESC LIMIT 10
     """)
@@ -146,9 +146,9 @@ async def admin_assign_list_shifts(callback: types.CallbackQuery):
         await callback.answer()
         return
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=f"{s[1]} {s[2]}-{s[3]} | {s[5]}", callback_data=f"assign_shift_{s[0]}")] for s in shifts
+        [InlineKeyboardButton(text=f"{s[1]} {s[2]}-{s[3]} | {s[4]}", callback_data=f"assign_shift_{s[0]}")] for s in shifts
     ] + [[InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back")]])
-    await callback.message.edit_text("📅 Выберите смену для назначения:", reply_markup=keyboard)
+    await callback.message.edit_text("📅 Выберите смену:", reply_markup=keyboard)
     await callback.answer()
 
 @router.callback_query(F.data.startswith("assign_shift_"))
@@ -176,6 +176,7 @@ async def admin_do_assign(callback: types.CallbackQuery):
     await callback.message.edit_text(f"✅ Исполнитель назначен на смену #{shift_id}")
     await callback.answer()
 
+# ========== НАВИГАЦИЯ ==========
 @router.callback_query(F.data == "admin_back")
 @admin_only
 async def admin_back(callback: types.CallbackQuery, state: FSMContext):
@@ -185,27 +186,17 @@ async def admin_back(callback: types.CallbackQuery, state: FSMContext):
         [InlineKeyboardButton(text="➕ Создать проект", callback_data="admin_create_project")],
         [InlineKeyboardButton(text="📅 Создать смену", callback_data="admin_create_shift")],
         [InlineKeyboardButton(text="👥 Назначить на смену", callback_data="admin_assign")],
-        [InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats")],
     ])
     await callback.message.edit_text("🔐 *Админ-панель*\n\nВыберите действие:", reply_markup=keyboard, parse_mode="Markdown")
     await callback.answer()
 
-@router.callback_query(F.data == "admin_stats")
-@admin_only
-async def admin_stats(callback: types.CallbackQuery):
-    import sqlite3
-    conn = sqlite3.connect("promostaff_demo.db")
-    cur = conn.cursor()
-    cur.execute("SELECT COUNT(*) FROM workers")
-    workers = cur.fetchone()[0]
-    cur.execute("SELECT COUNT(*) FROM clients")
-    clients = cur.fetchone()[0]
-    cur.execute("SELECT COUNT(*) FROM shifts")
-    shifts = cur.fetchone()[0]
-    cur.execute("SELECT COUNT(*) FROM assignments WHERE status = 'checked_out'")
-    completed = cur.fetchone()[0]
-    conn.close()
-    text = f"📊 *Статистика*\n\n👷 Исполнителей: {workers}\n🏢 Заказчиков: {clients}\n📅 Смен: {shifts}\n✅ Завершённых смен: {completed}"
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back")]])
-    await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="Markdown")
+# ========== ОБРАБОТЧИКИ ДЛЯ ЗАКАЗЧИКА ==========
+@router.callback_query(F.data == "my_projects")
+async def my_projects(callback: types.CallbackQuery):
+    await callback.message.edit_text("📋 *Проекты*\n\nФункция в разработке.", parse_mode="Markdown")
+    await callback.answer()
+
+@router.callback_query(F.data == "create_project")
+async def create_project_client(callback: types.CallbackQuery):
+    await callback.message.edit_text("➕ *Создание проекта*\n\nОбратитесь к администратору.", parse_mode="Markdown")
     await callback.answer()
