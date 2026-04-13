@@ -28,7 +28,6 @@ async def process_worker_name(message: types.Message, state: FSMContext):
     
     await state.update_data(full_name=message.text.strip())
     
-    # Клавиатура для запроса телефона
     keyboard = ReplyKeyboardMarkup(
         keyboard=[[KeyboardButton(text="📱 Отправить контакт", request_contact=True)]],
         resize_keyboard=True
@@ -46,23 +45,20 @@ async def process_worker_phone_contact(message: types.Message, state: FSMContext
     await state.update_data(phone=message.contact.phone_number)
     await message.answer(
         "Шаг 3/3: Выберите вашу профессию:",
-        reply_markup=professions_keyboard()
+        reply_markup=ReplyKeyboardRemove()
     )
+    await message.answer("Выберите профессию:", reply_markup=professions_keyboard())
     await state.set_state(WorkerRegistration.profession)
 
 @router.message(WorkerRegistration.phone, F.text)
 async def process_worker_phone_text(message: types.Message, state: FSMContext):
-    # Простая валидация телефона
     phone = message.text.strip()
-    if not phone.startswith("+") and not phone.startswith("8"):
-        await message.answer("❌ Введите номер в формате +7XXXXXXXXXX или нажмите кнопку:")
-        return
-    
     await state.update_data(phone=phone)
     await message.answer(
         "Шаг 3/3: Выберите вашу профессию:",
-        reply_markup=professions_keyboard()
+        reply_markup=ReplyKeyboardRemove()
     )
+    await message.answer("Выберите профессию:", reply_markup=professions_keyboard())
     await state.set_state(WorkerRegistration.profession)
 
 @router.callback_query(WorkerRegistration.profession, F.data.startswith("prof_"))
@@ -96,7 +92,6 @@ async def confirm_worker_reg(callback: types.CallbackQuery, state: FSMContext):
     )
     await state.clear()
     
-    # Показываем главное меню
     await callback.message.answer(
         f"👷 *{data['full_name']}*\n\nВыберите действие:",
         reply_markup=main_menu_keyboard(is_worker=True),
@@ -109,7 +104,7 @@ async def edit_worker_reg(callback: types.CallbackQuery, state: FSMContext):
     await state.clear()
     await start_worker_reg(callback, state)
 
-# ========== РЕГИСТРАЦИЯ ЗАКАЗЧИКА (УПРОЩЁННАЯ) ==========
+# ========== РЕГИСТРАЦИЯ ЗАКАЗЧИКА ==========
 @router.callback_query(F.data == "register_client")
 async def start_client_reg(callback: types.CallbackQuery, state: FSMContext):
     await callback.message.edit_text(
@@ -147,6 +142,29 @@ async def process_client_phone(message: types.Message, state: FSMContext):
     save_client(message.from_user.id, {
         **data,
         'phone': message.contact.phone_number
+    })
+    
+    await message.answer(
+        f"✅ *Регистрация завершена!*\n\n"
+        f"🏢 {data['company_name']}\n"
+        f"👤 {data['contact_name']}",
+        reply_markup=ReplyKeyboardRemove(),
+        parse_mode="Markdown"
+    )
+    await state.clear()
+    
+    await message.answer(
+        f"🏢 *{data['contact_name']} ({data['company_name']})*\n\nВыберите действие:",
+        reply_markup=main_menu_keyboard(is_client=True),
+        parse_mode="Markdown"
+    )
+
+@router.message(ClientRegistration.phone, F.text)
+async def process_client_phone_text(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    save_client(message.from_user.id, {
+        **data,
+        'phone': message.text.strip()
     })
     
     await message.answer(
