@@ -60,7 +60,10 @@ async def show_workers(callback: types.CallbackQuery):
 @router.callback_query(F.data == "admin_create_project")
 @admin_only
 async def admin_create_project_start(callback: types.CallbackQuery, state: FSMContext):
-    await callback.message.edit_text("➕ *Создание проекта*\n\nВведите название проекта:", parse_mode="Markdown")
+    await callback.message.edit_text(
+        "➕ *Создание проекта*\n\nВведите название проекта:",
+        parse_mode="Markdown"
+    )
     await state.set_state(ProjectCreation.name)
     await callback.answer()
 
@@ -70,6 +73,7 @@ async def admin_create_project_finish(message: types.Message, state: FSMContext)
     project_id = create_project(message.text.strip(), ADMIN_USER_ID)
     await message.answer(f"✅ Проект создан! ID: {project_id}")
     await state.clear()
+    await admin_panel(message)
 
 @router.callback_query(F.data == "admin_create_shift")
 @admin_only
@@ -122,6 +126,7 @@ async def admin_create_shift_finish(message: types.Message, state: FSMContext):
     except Exception as e:
         await message.answer(f"❌ Ошибка формата: {e}")
     await state.clear()
+    await admin_panel(message)
 
 @router.callback_query(F.data == "admin_assign")
 @admin_only
@@ -173,12 +178,14 @@ async def admin_do_assign(callback: types.CallbackQuery):
 
 @router.callback_query(F.data == "admin_back")
 @admin_only
-async def admin_back(callback: types.CallbackQuery):
+async def admin_back(callback: types.CallbackQuery, state: FSMContext):
+    await state.clear()
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📋 Список исполнителей", callback_data="admin_workers")],
         [InlineKeyboardButton(text="➕ Создать проект", callback_data="admin_create_project")],
         [InlineKeyboardButton(text="📅 Создать смену", callback_data="admin_create_shift")],
         [InlineKeyboardButton(text="👥 Назначить на смену", callback_data="admin_assign")],
+        [InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats")],
     ])
     await callback.message.edit_text("🔐 *Админ-панель*\n\nВыберите действие:", reply_markup=keyboard, parse_mode="Markdown")
     await callback.answer()
