@@ -1,6 +1,7 @@
 # handlers/shifts.py
 from aiogram import Router, F, types
 from aiogram.fsm.context import FSMContext
+from aiogram.filters import StateFilter
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from datetime import datetime, timedelta
 import asyncio
@@ -11,6 +12,7 @@ from db import (
     get_shift_assignments, get_assignment,
     confirm_assignment, do_checkin, do_checkout, get_shift_report
 )
+from states import ChatMessageState, TaskCompletion
 
 router = Router()
 
@@ -229,6 +231,7 @@ async def confirm_shift(callback: types.CallbackQuery):
 async def checkin_start(callback: types.CallbackQuery, state: FSMContext):
     shift_id = int(callback.data.replace("checkin_", ""))
     await state.update_data(checkin_shift_id=shift_id)
+    await state.set_state("waiting_checkin_geo")
     
     await callback.message.edit_text(
         "📍 *ЧЕК-ИН*\n\n"
@@ -236,12 +239,12 @@ async def checkin_start(callback: types.CallbackQuery, state: FSMContext):
         "*Нажмите на скрепку 📎 → Локация*",
         parse_mode="Markdown"
     )
-    await state.set_state("waiting_checkin_geo")
     await callback.answer()
 
-@router.message(F.location, state="waiting_checkin_geo")
+@router.message(F.location, StateFilter("waiting_checkin_geo"))
 async def checkin_geo_received(message: types.Message, state: FSMContext):
     await state.update_data(checkin_lat=message.location.latitude, checkin_lng=message.location.longitude)
+    await state.set_state("waiting_checkin_photo")
     
     await message.answer(
         "📸 *ЧЕК-ИН*\n\n"
@@ -249,9 +252,8 @@ async def checkin_geo_received(message: types.Message, state: FSMContext):
         "*Нажмите на скрепку 📎 → Камера*",
         parse_mode="Markdown"
     )
-    await state.set_state("waiting_checkin_photo")
 
-@router.message(F.photo, state="waiting_checkin_photo")
+@router.message(F.photo, StateFilter("waiting_checkin_photo"))
 async def checkin_photo_received(message: types.Message, state: FSMContext):
     photo_id = message.photo[-1].file_id
     data = await state.get_data()
@@ -299,6 +301,7 @@ async def checkin_photo_received(message: types.Message, state: FSMContext):
 async def checkout_start(callback: types.CallbackQuery, state: FSMContext):
     shift_id = int(callback.data.replace("checkout_", ""))
     await state.update_data(checkout_shift_id=shift_id)
+    await state.set_state("waiting_checkout_geo")
     
     await callback.message.edit_text(
         "📍 *ЧЕК-АУТ*\n\n"
@@ -306,12 +309,12 @@ async def checkout_start(callback: types.CallbackQuery, state: FSMContext):
         "*Нажмите на скрепку 📎 → Локация*",
         parse_mode="Markdown"
     )
-    await state.set_state("waiting_checkout_geo")
     await callback.answer()
 
-@router.message(F.location, state="waiting_checkout_geo")
+@router.message(F.location, StateFilter("waiting_checkout_geo"))
 async def checkout_geo_received(message: types.Message, state: FSMContext):
     await state.update_data(checkout_lat=message.location.latitude, checkout_lng=message.location.longitude)
+    await state.set_state("waiting_checkout_photo")
     
     await message.answer(
         "📸 *ЧЕК-АУТ*\n\n"
@@ -319,14 +322,13 @@ async def checkout_geo_received(message: types.Message, state: FSMContext):
         "*Нажмите на скрепку 📎 → Камера*",
         parse_mode="Markdown"
     )
-    await state.set_state("waiting_checkout_photo")
 
-@router.message(F.photo, state="waiting_checkout_photo")
+@router.message(F.photo, StateFilter("waiting_checkout_photo"))
 async def checkout_photo_received(message: types.Message, state: FSMContext):
     photo_id = message.photo[-1].file_id
     await finish_checkout(message, state, photo_id)
 
-@router.message(F.text, state="waiting_checkout_photo")
+@router.message(F.text, StateFilter("waiting_checkout_photo"))
 async def checkout_skip_photo(message: types.Message, state: FSMContext):
     if message.text == "0":
         await finish_checkout(message, state, None)
