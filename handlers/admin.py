@@ -1,10 +1,12 @@
 # handlers/admin.py
 from aiogram import Router, F, types
 from aiogram.filters import Command
+from aiogram.fsm.context import FSMContext
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from datetime import datetime, timedelta
 
 from config import ADMIN_USER_ID
+from states import ProjectCreation
 from db import (
     create_project, create_shift, get_shifts_by_project,
     get_workers, assign_worker, get_shift
@@ -41,15 +43,6 @@ async def admin_panel(message: types.Message):
     await message.answer("🔐 *Админ-панель*\n\nВыберите действие:", reply_markup=keyboard, parse_mode="Markdown")
 
 # ========== СПИСОК ИСПОЛНИТЕЛЕЙ ==========
-def get_workers() -> list:
-    import sqlite3
-    conn = sqlite3.connect("promostaff_demo.db")
-    cur = conn.cursor()
-    cur.execute("SELECT user_id, full_name, phone, profession FROM workers ORDER BY registered_at DESC")
-    rows = cur.fetchall()
-    conn.close()
-    return rows
-
 @router.callback_query(F.data == "admin_workers")
 @admin_only
 async def show_workers(callback: types.CallbackQuery):
@@ -75,7 +68,6 @@ async def show_workers(callback: types.CallbackQuery):
 @router.callback_query(F.data == "admin_create_project")
 @admin_only
 async def admin_create_project_start(callback: types.CallbackQuery, state: FSMContext):
-    from states import ProjectCreation
     await callback.message.edit_text(
         "➕ *Создание проекта*\n\nВведите название проекта:",
         parse_mode="Markdown"
@@ -119,6 +111,7 @@ async def admin_create_shift_list_projects(callback: types.CallbackQuery):
 async def admin_create_shift_form(callback: types.CallbackQuery, state: FSMContext):
     project_id = int(callback.data.replace("shift_project_", ""))
     await state.update_data(project_id=project_id)
+    await state.set_state("shift_data")
     
     await callback.message.edit_text(
         "📅 *Создание смены*\n\n"
@@ -127,7 +120,6 @@ async def admin_create_shift_form(callback: types.CallbackQuery, state: FSMConte
         "*Пример:* `15.05.2026 | 10:00 | 18:00 | ТЦ Европейский | 500`",
         parse_mode="Markdown"
     )
-    await state.set_state("shift_data")
     await callback.answer()
 
 @router.message(F.text, state="shift_data")
