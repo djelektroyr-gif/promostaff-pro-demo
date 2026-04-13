@@ -122,6 +122,15 @@ def get_worker(user_id: int):
     conn.close()
     return row
 
+def get_workers() -> list:
+    """Возвращает список всех зарегистрированных исполнителей."""
+    conn = sqlite3.connect(DB_NAME)
+    cur = conn.cursor()
+    cur.execute("SELECT user_id, full_name, phone, profession FROM workers ORDER BY registered_at DESC")
+    rows = cur.fetchall()
+    conn.close()
+    return rows
+
 # ========== РАБОТА С ЗАКАЗЧИКАМИ ==========
 def save_client(user_id: int, data: dict):
     conn = sqlite3.connect(DB_NAME)
