@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 from config import ADMIN_USER_ID
 from db import (
     create_project, create_shift, get_shifts_by_project,
-    get_workers as db_get_workers, assign_worker, get_shift
+    get_workers, assign_worker, get_shift
 )
 
 router = Router()
