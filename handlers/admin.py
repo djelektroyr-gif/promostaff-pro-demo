@@ -13,7 +13,18 @@ from db import (
     create_project,
     create_shift,
     get_workers,
+    get_worker_assignment_stats,
+    get_worker_status_counts,
+    set_worker_status,
+    get_admin_metrics,
+    list_open_shifts_admin,
+    close_shift_safe,
+    delete_shift_cascade,
+    list_admin_logs,
+    log_admin_action,
+    seed_demo_data,
     assign_worker,
+    delete_worker_safe,
     list_clients,
     delete_client_cascade,
     list_projects_admin,
@@ -54,11 +65,17 @@ def admin_only(func):
 def _admin_main_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
+            [InlineKeyboardButton(text="📊 Метрики", callback_data="admin_metrics")],
             [InlineKeyboardButton(text="📋 Исполнители", callback_data="admin_workers")],
+            [InlineKeyboardButton(text="🗑 Удалить исполнителя", callback_data="admin_workers_delete")],
+            [InlineKeyboardButton(text="🧭 Статусы исполнителей", callback_data="admin_worker_statuses")],
             [InlineKeyboardButton(text="🏢 Заказчики", callback_data="admin_clients")],
             [InlineKeyboardButton(text="➕ Создать проект", callback_data="admin_create_project")],
             [InlineKeyboardButton(text="📅 Создать смену", callback_data="admin_create_shift")],
+            [InlineKeyboardButton(text="🗓 Управление сменами", callback_data="admin_shift_manage")],
             [InlineKeyboardButton(text="👥 Назначить на смену", callback_data="admin_assign")],
+            [InlineKeyboardButton(text="🧪 Генератор тест-данных", callback_data="admin_seed_data")],
+            [InlineKeyboardButton(text="📝 Лог действий", callback_data="admin_logs")],
         ]
     )
 
@@ -71,6 +88,24 @@ async def admin_panel(message: types.Message):
         reply_markup=_admin_main_keyboard(),
         parse_mode="Markdown",
     )
+
+
+@router.callback_query(F.data == "admin_metrics")
+@admin_only
+async def admin_metrics(callback: types.CallbackQuery):
+    m = get_admin_metrics()
+    await callback.message.edit_text(
+        "📊 *Быстрые метрики DEMO*\n\n"
+        f"👷 Исполнители: *{m['workers']}*\n"
+        f"🏢 Заказчики: *{m['clients']}*\n"
+        f"📁 Проекты: *{m['projects']}*\n"
+        f"📅 Открытые смены: *{m['open_shifts']}*",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back")]]
+        ),
+    )
+    await callback.answer()
 
 
 @router.callback_query(F.data == "admin_workers")
@@ -88,6 +123,226 @@ async def show_workers(callback: types.CallbackQuery):
         inline_keyboard=[[InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back")]]
     )
     await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="Markdown")
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin_worker_statuses")
+@admin_only
+async def admin_worker_statuses_menu(callback: types.CallbackQuery):
+    counts = get_worker_status_counts()
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=f"Все ({counts['all']})", callback_data="admin_workers_filter_all")],
+            [InlineKeyboardButton(text=f"new ({counts['new']})", callback_data="admin_workers_filter_new")],
+            [InlineKeyboardButton(text=f"reviewed ({counts['reviewed']})", callback_data="admin_workers_filter_reviewed")],
+            [InlineKeyboardButton(text=f"approved ({counts['approved']})", callback_data="admin_workers_filter_approved")],
+            [InlineKeyboardButton(text=f"rejected ({counts['rejected']})", callback_data="admin_workers_filter_rejected")],
+            [InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back")],
+        ]
+    )
+    await callback.message.edit_text(
+        "🧭 *Статусы заявок исполнителей*\n\nВыберите фильтр.",
+        parse_mode="Markdown",
+        reply_markup=keyboard,
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("admin_workers_filter_"))
+@admin_only
+async def admin_workers_by_status(callback: types.CallbackQuery):
+    status = callback.data.replace("admin_workers_filter_", "")
+    workers = get_workers(None if status == "all" else status)
+    if not workers:
+        await callback.message.edit_text(
+            f"📋 Нет исполнителей со статусом `{status}`.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(text="🔙 К фильтрам", callback_data="admin_worker_statuses")],
+                ]
+            ),
+        )
+        await callback.answer()
+        return
+    text = f"📋 *Исполнители ({status})*\n\n"
+    rows = []
+    for w in workers:
+        uid, name, phone, profession, cur_status = w[0], w[1], w[2], w[3], w[4]
+        text += f"🆔 `{uid}` — {name} | {profession} | статус: *{cur_status}*\n"
+        rows.append([InlineKeyboardButton(text=f"⚙️ Статус {uid}", callback_data=f"admin_worker_status_{uid}")])
+    rows.append([InlineKeyboardButton(text="🔙 К фильтрам", callback_data="admin_worker_statuses")])
+    await callback.message.edit_text(
+        text,
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("admin_worker_status_"))
+@admin_only
+async def admin_worker_status_pick(callback: types.CallbackQuery):
+    raw = callback.data.replace("admin_worker_status_", "")
+    if not raw.isdigit():
+        await callback.answer()
+        return
+    worker_id = int(raw)
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="new", callback_data=f"admin_worker_set_{worker_id}_new")],
+            [InlineKeyboardButton(text="reviewed", callback_data=f"admin_worker_set_{worker_id}_reviewed")],
+            [InlineKeyboardButton(text="approved", callback_data=f"admin_worker_set_{worker_id}_approved")],
+            [InlineKeyboardButton(text="rejected", callback_data=f"admin_worker_set_{worker_id}_rejected")],
+            [InlineKeyboardButton(text="🔙 К фильтрам", callback_data="admin_worker_statuses")],
+        ]
+    )
+    await callback.message.edit_text(
+        f"⚙️ Выберите новый статус для исполнителя `{worker_id}`:",
+        parse_mode="Markdown",
+        reply_markup=keyboard,
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("admin_worker_set_"))
+@admin_only
+async def admin_worker_status_set(callback: types.CallbackQuery):
+    raw = callback.data.replace("admin_worker_set_", "")
+    parts = raw.split("_", 1)
+    if len(parts) != 2 or not parts[0].isdigit():
+        await callback.answer()
+        return
+    worker_id = int(parts[0])
+    new_status = parts[1]
+    ok = set_worker_status(worker_id, new_status)
+    if ok:
+        log_admin_action(callback.from_user.id, "set_worker_status", "worker", worker_id, new_status)
+        await callback.message.edit_text(
+            f"✅ Статус исполнителя `{worker_id}` обновлён: *{new_status}*",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text="🔙 К фильтрам", callback_data="admin_worker_statuses")]]
+            ),
+        )
+    else:
+        await callback.message.edit_text(
+            "❌ Не удалось обновить статус.",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text="🔙 К фильтрам", callback_data="admin_worker_statuses")]]
+            ),
+        )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin_workers_delete")
+@admin_only
+async def admin_workers_delete_menu(callback: types.CallbackQuery):
+    workers = get_workers()
+    if not workers:
+        await callback.message.edit_text(
+            "🗑 Нет исполнителей для удаления.",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back")]]
+            ),
+        )
+        await callback.answer()
+        return
+
+    rows = []
+    text = "🗑 *Удаление исполнителя*\n\nВыберите исполнителя:\n"
+    for w in workers:
+        uid, full_name = int(w[0]), w[1] or f"ID {w[0]}"
+        stats = get_worker_assignment_stats(uid)
+        text += (
+            f"\n• `{uid}` — {full_name}\n"
+            f"  Назначений: {stats['assignments_total']}, открытых задач: {stats['open_tasks']}"
+        )
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=f"🗑 {full_name[:18]} ({uid})",
+                    callback_data=f"admin_worker_delask_{uid}",
+                )
+            ]
+        )
+    rows.append([InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back")])
+    await callback.message.edit_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+        parse_mode="Markdown",
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("admin_worker_delask_"))
+@admin_only
+async def admin_worker_delete_confirm(callback: types.CallbackQuery):
+    raw = callback.data.replace("admin_worker_delask_", "")
+    if not raw.isdigit():
+        await callback.answer()
+        return
+    worker_id = int(raw)
+    worker = next((w for w in get_workers() if int(w[0]) == worker_id), None)
+    worker_name = worker[1] if worker else f"ID {worker_id}"
+    stats = get_worker_assignment_stats(worker_id)
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Да, удалить", callback_data=f"admin_worker_deldo_{worker_id}")],
+            [InlineKeyboardButton(text="❌ Отмена", callback_data="admin_workers_delete")],
+        ]
+    )
+    await callback.message.edit_text(
+        "⚠️ *Подтверждение удаления*\n\n"
+        f"Исполнитель: `{worker_id}` — {worker_name}\n"
+        f"Назначений будет удалено: *{stats['assignments_total']}*\n"
+        f"Открытых задач будет отвязано: *{stats['open_tasks']}*\n\n"
+        "Продолжить?",
+        reply_markup=keyboard,
+        parse_mode="Markdown",
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("admin_worker_deldo_"))
+@admin_only
+async def admin_worker_delete_do(callback: types.CallbackQuery):
+    raw = callback.data.replace("admin_worker_deldo_", "")
+    if not raw.isdigit():
+        await callback.answer()
+        return
+    worker_id = int(raw)
+    result = delete_worker_safe(worker_id)
+    if not result["deleted"]:
+        await callback.message.edit_text(
+            f"❌ Исполнитель `{worker_id}` не найден.",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text="🔙 К удалению", callback_data="admin_workers_delete")]]
+            ),
+            parse_mode="Markdown",
+        )
+        await callback.answer()
+        return
+    log_admin_action(
+        callback.from_user.id,
+        "delete_worker_safe",
+        "worker",
+        worker_id,
+        f"assignments={result['assignments_deleted']};tasks={result['tasks_unassigned']}",
+    )
+    await callback.message.edit_text(
+        "✅ Исполнитель удалён безопасно.\n\n"
+        f"ID: `{worker_id}`\n"
+        f"Удалено назначений: *{result['assignments_deleted']}*\n"
+        f"Отвязано задач: *{result['tasks_unassigned']}*",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="🔙 К удалению", callback_data="admin_workers_delete")],
+                [InlineKeyboardButton(text="🏠 В админ-панель", callback_data="admin_back")],
+            ]
+        ),
+        parse_mode="Markdown",
+    )
     await callback.answer()
 
 
@@ -137,6 +392,7 @@ async def admin_delete_client(callback: types.CallbackQuery):
         await callback.answer("Нельзя удалить свой admin-id как заказчика из этой кнопки.", show_alert=True)
         return
     delete_client_cascade(cid)
+    log_admin_action(callback.from_user.id, "delete_client_cascade", "client", cid, "cascade")
     await callback.message.edit_text(
         f"✅ Заказчик `{cid}` и связанные проекты/смены удалены из DEMO-БД.",
         reply_markup=InlineKeyboardMarkup(
@@ -202,6 +458,7 @@ async def admin_create_project_finish(message: types.Message, state: FSMContext)
         await message.answer("❌ Слишком короткое название.")
         return
     project_id = create_project(name, int(client_id))
+    log_admin_action(message.from_user.id, "create_project", "project", project_id, f"client_id={client_id}")
     await state.clear()
     await message.answer(f"✅ Проект создан. ID: `{project_id}`, заказчик: `{client_id}`", parse_mode="Markdown")
     await admin_panel(message)
@@ -276,6 +533,7 @@ async def admin_create_shift_finish(message: types.Message, state: FSMContext):
                 "rate": rate,
             },
         )
+        log_admin_action(message.from_user.id, "create_shift", "shift", shift_id, f"project_id={project_id}")
         await message.answer(f"✅ Смена создана! ID: `{shift_id}`", parse_mode="Markdown")
     except Exception as e:
         await message.answer(f"❌ Ошибка: {e}")
@@ -316,9 +574,9 @@ async def admin_assign_list_shifts(callback: types.CallbackQuery):
 @admin_only
 async def admin_assign_list_workers(callback: types.CallbackQuery):
     shift_id = int(callback.data.replace("assign_shift_", ""))
-    workers = get_workers()
+    workers = get_workers("approved")
     if not workers:
-        await callback.message.edit_text("❌ Нет исполнителей.")
+        await callback.message.edit_text("❌ Нет исполнителей со статусом `approved`.", parse_mode="Markdown")
         await callback.answer()
         return
     keyboard = InlineKeyboardMarkup(
@@ -339,7 +597,143 @@ async def admin_do_assign(callback: types.CallbackQuery):
     shift_id = int(parts[2])
     worker_id = int(parts[3])
     assign_worker(shift_id, worker_id)
+    log_admin_action(callback.from_user.id, "assign_worker", "shift", shift_id, f"worker_id={worker_id}")
     await callback.message.edit_text(f"✅ Исполнитель `{worker_id}` назначен на смену #{shift_id}")
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin_shift_manage")
+@admin_only
+async def admin_shift_manage_list(callback: types.CallbackQuery):
+    shifts = list_open_shifts_admin(30)
+    if not shifts:
+        await callback.message.edit_text(
+            "📅 Нет открытых смен.",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back")]]
+            ),
+        )
+        await callback.answer()
+        return
+    rows = []
+    text = "🗓 *Управление сменами*\n\n"
+    for s in shifts:
+        sid, date, st, et, project_name, status = s
+        text += f"• #{sid} {date} {st}-{et} | {project_name} | {status}\n"
+        rows.append([InlineKeyboardButton(text=f"🛑 Закрыть #{sid}", callback_data=f"admin_shift_close_{sid}")])
+        rows.append([InlineKeyboardButton(text=f"🗑 Удалить #{sid}", callback_data=f"admin_shift_delask_{sid}")])
+    rows.append([InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back")])
+    await callback.message.edit_text(
+        text,
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("admin_shift_close_"))
+@admin_only
+async def admin_shift_close(callback: types.CallbackQuery):
+    sid_raw = callback.data.replace("admin_shift_close_", "")
+    if not sid_raw.isdigit():
+        await callback.answer()
+        return
+    sid = int(sid_raw)
+    result = close_shift_safe(sid)
+    if result["closed"]:
+        log_admin_action(callback.from_user.id, "close_shift_safe", "shift", sid, result["reason"])
+        await callback.answer("Смена закрыта", show_alert=False)
+    else:
+        await callback.answer("Смена не найдена", show_alert=True)
+    await admin_shift_manage_list(callback)
+
+
+@router.callback_query(F.data.startswith("admin_shift_delask_"))
+@admin_only
+async def admin_shift_delete_confirm(callback: types.CallbackQuery):
+    sid_raw = callback.data.replace("admin_shift_delask_", "")
+    if not sid_raw.isdigit():
+        await callback.answer()
+        return
+    sid = int(sid_raw)
+    await callback.message.edit_text(
+        f"⚠️ Удалить смену #{sid} и каскадно удалить назначения/задачи/чат?",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="✅ Да, удалить", callback_data=f"admin_shift_deldo_{sid}")],
+                [InlineKeyboardButton(text="❌ Отмена", callback_data="admin_shift_manage")],
+            ]
+        ),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("admin_shift_deldo_"))
+@admin_only
+async def admin_shift_delete_do(callback: types.CallbackQuery):
+    sid_raw = callback.data.replace("admin_shift_deldo_", "")
+    if not sid_raw.isdigit():
+        await callback.answer()
+        return
+    sid = int(sid_raw)
+    result = delete_shift_cascade(sid)
+    if result["deleted"]:
+        log_admin_action(
+            callback.from_user.id,
+            "delete_shift_cascade",
+            "shift",
+            sid,
+            f"assignments={result['assignments']};tasks={result['tasks']};chat={result['chat_messages']}",
+        )
+        await callback.answer("Смена удалена", show_alert=False)
+    else:
+        await callback.answer("Смена не найдена", show_alert=True)
+    await admin_shift_manage_list(callback)
+
+
+@router.callback_query(F.data == "admin_logs")
+@admin_only
+async def admin_show_logs(callback: types.CallbackQuery):
+    logs = list_admin_logs(25)
+    if not logs:
+        await callback.message.edit_text(
+            "📝 Лог действий пока пуст.",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back")]]
+            ),
+        )
+        await callback.answer()
+        return
+    text = "📝 *Последние действия админа:*\n\n"
+    for row in logs:
+        admin_uid, action, entity_type, entity_id, details, created_at = row
+        text += f"• {created_at} | {action} {entity_type}#{entity_id or '-'} | {details}\n"
+    await callback.message.edit_text(
+        text[:3900],
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back")]]
+        ),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin_seed_data")
+@admin_only
+async def admin_seed_data_run(callback: types.CallbackQuery):
+    stats = seed_demo_data()
+    log_admin_action(callback.from_user.id, "seed_demo_data", "system", None, str(stats))
+    await callback.message.edit_text(
+        "🧪 Тест-данные созданы:\n\n"
+        f"👷 Исполнители: {stats['workers']}\n"
+        f"🏢 Заказчики: {stats['clients']}\n"
+        f"📁 Проекты: {stats['projects']}\n"
+        f"📅 Смены: {stats['shifts']}\n"
+        f"👥 Назначения: {stats['assignments']}\n"
+        f"📋 Задачи: {stats['tasks']}",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back")]]
+        ),
+    )
     await callback.answer()
 
 

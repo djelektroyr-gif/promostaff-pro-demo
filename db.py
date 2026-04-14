@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 # База всегда рядом с кодом (не зависит от текущей директории при запуске)
@@ -24,6 +24,7 @@ def init_db():
             full_name TEXT NOT NULL,
             phone TEXT,
             profession TEXT,
+            status TEXT DEFAULT 'new',
             registered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """
@@ -114,6 +115,27 @@ def init_db():
         )
     """
     )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS admin_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            admin_user_id INTEGER NOT NULL,
+            action TEXT NOT NULL,
+            entity_type TEXT,
+            entity_id INTEGER,
+            details TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """
+    )
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_admin_logs_created_at ON admin_logs(created_at DESC)")
+
+    # Миграция: у старых БД может не быть колонки workers.status
+    cur.execute("PRAGMA table_info(workers)")
+    worker_cols = {r[1] for r in cur.fetchall()}
+    if "status" not in worker_cols:
+        cur.execute("ALTER TABLE workers ADD COLUMN status TEXT DEFAULT 'new'")
+    cur.execute("UPDATE workers SET status = 'new' WHERE status IS NULL OR TRIM(status) = ''")
 
     conn.commit()
     conn.close()
@@ -148,10 +170,20 @@ def save_worker(user_id: int, data: dict):
     cur = conn.cursor()
     cur.execute(
         """
-        INSERT OR REPLACE INTO workers (user_id, full_name, phone, profession)
-        VALUES (?, ?, ?, ?)
+        INSERT INTO workers (user_id, full_name, phone, profession, status)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(user_id) DO UPDATE SET
+            full_name = excluded.full_name,
+            phone = excluded.phone,
+            profession = excluded.profession
     """,
-        (user_id, data.get("full_name"), data.get("phone"), data.get("profession")),
+        (
+            user_id,
+            data.get("full_name"),
+            data.get("phone"),
+            data.get("profession"),
+            data.get("status") or "new",
+        ),
     )
     conn.commit()
     conn.close()
@@ -166,15 +198,120 @@ def get_worker(user_id: int):
     return row
 
 
-def get_workers() -> list:
+def get_workers(status: str | None = None) -> list:
     conn = db_connect()
     cur = conn.cursor()
-    cur.execute(
-        "SELECT user_id, full_name, phone, profession FROM workers ORDER BY registered_at DESC"
-    )
+    if status and status != "all":
+        cur.execute(
+            """
+            SELECT user_id, full_name, phone, profession, status
+            FROM workers
+            WHERE status = ?
+            ORDER BY registered_at DESC
+            """,
+            (status,),
+        )
+    else:
+        cur.execute(
+            """
+            SELECT user_id, full_name, phone, profession, status
+            FROM workers
+            ORDER BY registered_at DESC
+            """
+        )
     rows = cur.fetchall()
     conn.close()
     return rows
+
+
+def get_worker_status_counts() -> dict:
+    conn = db_connect()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT status, COUNT(*)
+        FROM workers
+        GROUP BY status
+        """
+    )
+    rows = cur.fetchall()
+    conn.close()
+    out = {"new": 0, "reviewed": 0, "approved": 0, "rejected": 0}
+    for status, cnt in rows:
+        out[str(status or "new")] = int(cnt or 0)
+    out["all"] = sum(out.values())
+    return out
+
+
+def set_worker_status(worker_id: int, status: str) -> bool:
+    if status not in {"new", "reviewed", "approved", "rejected"}:
+        return False
+    conn = db_connect()
+    cur = conn.cursor()
+    cur.execute("UPDATE workers SET status = ? WHERE user_id = ?", (status, worker_id))
+    ok = cur.rowcount > 0
+    conn.commit()
+    conn.close()
+    return ok
+
+
+def get_worker_assignment_stats(worker_id: int) -> dict:
+    """Короткая статистика по назначениям исполнителя для админки."""
+    conn = db_connect()
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) FROM assignments WHERE worker_id = ?", (worker_id,))
+    assignments_total = int(cur.fetchone()[0] or 0)
+    cur.execute(
+        """
+        SELECT COUNT(*)
+        FROM tasks
+        WHERE assigned_to = ? AND status != 'completed'
+        """,
+        (worker_id,),
+    )
+    open_tasks = int(cur.fetchone()[0] or 0)
+    conn.close()
+    return {"assignments_total": assignments_total, "open_tasks": open_tasks}
+
+
+def delete_worker_safe(worker_id: int) -> dict:
+    """
+    Безопасно удалить исполнителя:
+    - удаляем назначения из assignments,
+    - отвязываем назначенные задачи (assigned_to = NULL),
+    - удаляем из workers.
+    """
+    conn = db_connect()
+    cur = conn.cursor()
+
+    cur.execute("SELECT 1 FROM workers WHERE user_id = ?", (worker_id,))
+    exists = cur.fetchone() is not None
+    if not exists:
+        conn.close()
+        return {"deleted": False, "assignments_deleted": 0, "tasks_unassigned": 0}
+
+    cur.execute("SELECT COUNT(*) FROM assignments WHERE worker_id = ?", (worker_id,))
+    assignments_deleted = int(cur.fetchone()[0] or 0)
+    cur.execute(
+        """
+        SELECT COUNT(*) FROM tasks
+        WHERE assigned_to = ? AND status != 'completed'
+        """,
+        (worker_id,),
+    )
+    tasks_unassigned = int(cur.fetchone()[0] or 0)
+
+    cur.execute("DELETE FROM assignments WHERE worker_id = ?", (worker_id,))
+    cur.execute("UPDATE tasks SET assigned_to = NULL WHERE assigned_to = ?", (worker_id,))
+    cur.execute("DELETE FROM workers WHERE user_id = ?", (worker_id,))
+
+    conn.commit()
+    conn.close()
+    return {
+        "deleted": True,
+        "assignments_deleted": assignments_deleted,
+        "tasks_unassigned": tasks_unassigned,
+    }
 
 
 # ========== ЗАКАЗЧИКИ ==========
@@ -365,6 +502,25 @@ def list_shifts_admin(limit: int = 30) -> list:
     return rows
 
 
+def list_open_shifts_admin(limit: int = 30) -> list:
+    conn = db_connect()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT s.id, s.shift_date, s.start_time, s.end_time, p.name, s.status
+        FROM shifts s
+        JOIN projects p ON s.project_id = p.id
+        WHERE s.status = 'open'
+        ORDER BY s.shift_date DESC
+        LIMIT ?
+    """,
+        (limit,),
+    )
+    rows = cur.fetchall()
+    conn.close()
+    return rows
+
+
 def get_shift(shift_id: int):
     conn = db_connect()
     cur = conn.cursor()
@@ -402,6 +558,58 @@ def assign_worker(shift_id: int, worker_id: int):
     )
     conn.commit()
     conn.close()
+
+
+def close_shift_safe(shift_id: int) -> dict:
+    """Закрывает смену без удаления данных."""
+    conn = db_connect()
+    cur = conn.cursor()
+    cur.execute("SELECT status FROM shifts WHERE id = ?", (shift_id,))
+    row = cur.fetchone()
+    if not row:
+        conn.close()
+        return {"closed": False, "reason": "not_found"}
+    if row[0] == "closed":
+        conn.close()
+        return {"closed": True, "reason": "already_closed"}
+    cur.execute("UPDATE shifts SET status = 'closed' WHERE id = ?", (shift_id,))
+    cur.execute(
+        """
+        UPDATE assignments
+        SET status = CASE
+            WHEN status IN ('checked_out', 'checked_in') THEN status
+            ELSE 'cancelled'
+        END
+        WHERE shift_id = ?
+        """,
+        (shift_id,),
+    )
+    conn.commit()
+    conn.close()
+    return {"closed": True, "reason": "ok"}
+
+
+def delete_shift_cascade(shift_id: int) -> dict:
+    """Удаляет смену и связанные назначения/задачи/чат."""
+    conn = db_connect()
+    cur = conn.cursor()
+    cur.execute("SELECT 1 FROM shifts WHERE id = ?", (shift_id,))
+    if not cur.fetchone():
+        conn.close()
+        return {"deleted": False, "assignments": 0, "tasks": 0, "chat_messages": 0}
+    cur.execute("SELECT COUNT(*) FROM assignments WHERE shift_id = ?", (shift_id,))
+    ac = int(cur.fetchone()[0] or 0)
+    cur.execute("SELECT COUNT(*) FROM tasks WHERE shift_id = ?", (shift_id,))
+    tc = int(cur.fetchone()[0] or 0)
+    cur.execute("SELECT COUNT(*) FROM chat_messages WHERE shift_id = ?", (shift_id,))
+    cc = int(cur.fetchone()[0] or 0)
+    cur.execute("DELETE FROM assignments WHERE shift_id = ?", (shift_id,))
+    cur.execute("DELETE FROM tasks WHERE shift_id = ?", (shift_id,))
+    cur.execute("DELETE FROM chat_messages WHERE shift_id = ?", (shift_id,))
+    cur.execute("DELETE FROM shifts WHERE id = ?", (shift_id,))
+    conn.commit()
+    conn.close()
+    return {"deleted": True, "assignments": ac, "tasks": tc, "chat_messages": cc}
 
 
 def confirm_assignment(shift_id: int, worker_id: int):
@@ -625,3 +833,167 @@ def get_shift_report(shift_id: int) -> dict:
     conn.close()
 
     return {"shift": shift, "assignments": assignments, "tasks": tasks}
+
+
+def get_admin_metrics() -> dict:
+    conn = db_connect()
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) FROM workers")
+    workers = int(cur.fetchone()[0] or 0)
+    cur.execute("SELECT COUNT(*) FROM clients")
+    clients = int(cur.fetchone()[0] or 0)
+    cur.execute("SELECT COUNT(*) FROM projects")
+    projects = int(cur.fetchone()[0] or 0)
+    cur.execute("SELECT COUNT(*) FROM shifts WHERE status = 'open'")
+    open_shifts = int(cur.fetchone()[0] or 0)
+    conn.close()
+    return {
+        "workers": workers,
+        "clients": clients,
+        "projects": projects,
+        "open_shifts": open_shifts,
+    }
+
+
+def log_admin_action(admin_user_id: int, action: str, entity_type: str, entity_id: int | None, details: str = "") -> None:
+    conn = db_connect()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO admin_logs (admin_user_id, action, entity_type, entity_id, details)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (admin_user_id, action, entity_type, entity_id, details[:500]),
+    )
+    conn.commit()
+    conn.close()
+
+
+def list_admin_logs(limit: int = 25) -> list:
+    conn = db_connect()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT admin_user_id, action, entity_type, entity_id, details, created_at
+        FROM admin_logs
+        ORDER BY id DESC
+        LIMIT ?
+        """,
+        (limit,),
+    )
+    rows = cur.fetchall()
+    conn.close()
+    return rows
+
+
+def seed_demo_data() -> dict:
+    """
+    Генератор тестовых данных для e2e:
+    5 исполнителей, 2 заказчика, 2 проекта, 4 смены, назначения и 4 задачи.
+    """
+    conn = db_connect()
+    cur = conn.cursor()
+    base_w = 900000
+    base_c = 800000
+
+    workers = [
+        (base_w + 1, "Иван Петров", "+79001111111", "Хелпер", "approved"),
+        (base_w + 2, "Мария Смирнова", "+79002222222", "Промоутер", "reviewed"),
+        (base_w + 3, "Олег Волков", "+79003333333", "Грузчик", "new"),
+        (base_w + 4, "Анна Кузнецова", "+79004444444", "Хостес", "approved"),
+        (base_w + 5, "Дмитрий Соколов", "+79005555555", "Парковщик", "rejected"),
+    ]
+    for row in workers:
+        cur.execute(
+            """
+            INSERT INTO workers (user_id, full_name, phone, profession, status)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                full_name=excluded.full_name,
+                phone=excluded.phone,
+                profession=excluded.profession,
+                status=excluded.status
+            """,
+            row,
+        )
+
+    clients = [
+        (base_c + 1, "ООО Ивент Лаб", "Алексей", "+79991111111"),
+        (base_c + 2, "ИП Романов", "Екатерина", "+79992222222"),
+    ]
+    for row in clients:
+        cur.execute(
+            """
+            INSERT INTO clients (user_id, company_name, contact_name, phone)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                company_name=excluded.company_name,
+                contact_name=excluded.contact_name,
+                phone=excluded.phone
+            """,
+            row,
+        )
+
+    cur.execute("INSERT INTO projects (name, client_id) VALUES (?, ?)", ("Выставка PRO Demo", base_c + 1))
+    p1 = int(cur.lastrowid)
+    cur.execute("INSERT INTO projects (name, client_id) VALUES (?, ?)", ("Промо-акция Весна", base_c + 2))
+    p2 = int(cur.lastrowid)
+
+    today = datetime.now().date()
+    shifts = [
+        (p1, str(today + timedelta(days=1)), "10:00", "18:00", "Крокус Экспо", 500, "open"),
+        (p1, str(today + timedelta(days=2)), "09:00", "17:00", "ВДНХ", 550, "open"),
+        (p2, str(today + timedelta(days=1)), "12:00", "20:00", "ТЦ Европейский", 600, "open"),
+        (p2, str(today + timedelta(days=3)), "11:00", "19:00", "Арбат, 1", 520, "open"),
+    ]
+    shift_ids: list[int] = []
+    for s in shifts:
+        cur.execute(
+            """
+            INSERT INTO shifts (project_id, shift_date, start_time, end_time, location, rate, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            s,
+        )
+        shift_ids.append(int(cur.lastrowid))
+
+    assignments = [
+        (shift_ids[0], base_w + 1, "pending"),
+        (shift_ids[0], base_w + 4, "confirmed"),
+        (shift_ids[1], base_w + 1, "pending"),
+        (shift_ids[2], base_w + 4, "pending"),
+    ]
+    for a in assignments:
+        cur.execute(
+            """
+            INSERT OR IGNORE INTO assignments (shift_id, worker_id, status)
+            VALUES (?, ?, ?)
+            """,
+            a,
+        )
+
+    tasks = [
+        (shift_ids[0], "Подготовить стойку регистрации", "Прибыть за 30 минут", base_w + 1),
+        (shift_ids[0], "Раздача бейджей", "Работа на входе", base_w + 4),
+        (shift_ids[2], "Раздача листовок", "Точка у входа", base_w + 4),
+        (shift_ids[1], "Сбор коробов", "После завершения смены", base_w + 1),
+    ]
+    for t in tasks:
+        cur.execute(
+            """
+            INSERT INTO tasks (shift_id, title, description, assigned_to)
+            VALUES (?, ?, ?, ?)
+            """,
+            t,
+        )
+
+    conn.commit()
+    conn.close()
+    return {
+        "workers": len(workers),
+        "clients": len(clients),
+        "projects": 2,
+        "shifts": len(shifts),
+        "assignments": len(assignments),
+        "tasks": len(tasks),
+    }
