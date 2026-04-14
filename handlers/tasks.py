@@ -11,12 +11,93 @@ from db import (
     get_shift_assignments,
     list_shifts_with_open_tasks_for_worker,
     get_worker,
+    get_shift_with_owner,
+    get_task,
+    get_client,
+    list_tasks_for_client,
 )
 from states import TaskCreation, TaskCompletion
 
 router = Router()
 
 T_STATUS = 5
+
+
+@router.callback_query(F.data == "my_client_tasks")
+async def client_tasks_panel(callback: types.CallbackQuery):
+    await _render_client_tasks(callback, "all")
+
+
+@router.callback_query(F.data.startswith("my_client_tasks_"))
+async def client_tasks_panel_filter(callback: types.CallbackQuery):
+    flt = callback.data.replace("my_client_tasks_", "")
+    if flt not in {"all", "open", "done"}:
+        flt = "all"
+    await _render_client_tasks(callback, flt)
+
+
+async def _render_client_tasks(callback: types.CallbackQuery, flt: str) -> None:
+    user_id = callback.from_user.id
+    if not get_client(user_id):
+        await callback.answer("Только для заказчика.", show_alert=True)
+        return
+    tasks_all = list_tasks_for_client(user_id, limit=200)
+    if flt == "open":
+        tasks = [t for t in tasks_all if str(t[2]) != "completed"]
+    elif flt == "done":
+        tasks = [t for t in tasks_all if str(t[2]) == "completed"]
+    else:
+        tasks = tasks_all
+    if not tasks:
+        await callback.message.edit_text(
+            "✅ По выбранному фильтру задач нет.",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        InlineKeyboardButton(text="Все", callback_data="my_client_tasks_all"),
+                        InlineKeyboardButton(text="Открытые", callback_data="my_client_tasks_open"),
+                        InlineKeyboardButton(text="Выполненные", callback_data="my_client_tasks_done"),
+                    ],
+                    [InlineKeyboardButton(text="🔙 Назад", callback_data="main_menu")],
+                ]
+            ),
+        )
+        await callback.answer()
+        return
+    open_cnt = sum(1 for t in tasks_all if str(t[2]) != "completed")
+    done_cnt = len(tasks_all) - open_cnt
+    text = (
+        "✅ *Мои задачи (заказчик)*\n\n"
+        f"Всего: *{len(tasks_all)}* | Открыто: *{open_cnt}* | Выполнено: *{done_cnt}*\n"
+        f"Фильтр: *{ {'all':'Все','open':'Открытые','done':'Выполненные'}[flt] }*\n\n"
+    )
+    rows = []
+    for task_id, title, status, shift_id, date, st, et, worker_name in tasks[:40]:
+        emoji = "✅" if status == "completed" else "⏳"
+        text += f"{emoji} #{task_id} | {title}\nСмена #{shift_id}: {date} {st}-{et} | {worker_name}\n\n"
+    # Быстрые кнопки по сменам, где есть открытые задачи
+    shift_ids = []
+    for t in tasks:
+        if str(t[2]) != "completed" and int(t[3]) not in shift_ids:
+            shift_ids.append(int(t[3]))
+    for sid in shift_ids[:8]:
+        rows.append([InlineKeyboardButton(text=f"📅 Открыть смену #{sid}", callback_data=f"shift_detail_{sid}")])
+    rows.extend(
+        [
+            [
+                InlineKeyboardButton(text="Все", callback_data="my_client_tasks_all"),
+                InlineKeyboardButton(text="Открытые", callback_data="my_client_tasks_open"),
+                InlineKeyboardButton(text="Выполненные", callback_data="my_client_tasks_done"),
+            ],
+            [InlineKeyboardButton(text="🔙 Назад", callback_data="main_menu")],
+        ]
+    )
+    await callback.message.edit_text(
+        text[:3900],
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+    )
+    await callback.answer()
 
 
 @router.callback_query(F.data == "my_tasks")
@@ -201,6 +282,15 @@ async def task_report_photo_received(message: types.Message, state: FSMContext):
     report_text = data.get("report_text", "")
     complete_task(task_id, report_text, photo_id)
     await message.answer("✅ Задача выполнена!")
+    task = get_task(int(task_id))
+    if task:
+        shift_id = int(task[1])
+        shift_row = get_shift_with_owner(shift_id)
+        if shift_row and shift_row[7]:
+            await message.bot.send_message(
+                int(shift_row[7]),
+                f"✅ Исполнитель завершил задачу по смене #{shift_id}: {task[2]}",
+            )
     await state.clear()
 
 
@@ -212,6 +302,15 @@ async def task_report_skip_photo(message: types.Message, state: FSMContext):
         report_text = data.get("report_text", "")
         complete_task(task_id, report_text, None)
         await message.answer("✅ Задача выполнена!")
+        task = get_task(int(task_id))
+        if task:
+            shift_id = int(task[1])
+            shift_row = get_shift_with_owner(shift_id)
+            if shift_row and shift_row[7]:
+                await message.bot.send_message(
+                    int(shift_row[7]),
+                    f"✅ Исполнитель завершил задачу по смене #{shift_id}: {task[2]}",
+                )
         await state.clear()
     else:
         await message.answer("Отправьте фото или `0`.")

@@ -1,5 +1,6 @@
 # handlers/shifts.py
 import math
+from datetime import datetime
 
 from aiogram import Router, F, types
 from aiogram.fsm.context import FSMContext
@@ -20,8 +21,14 @@ from db import (
     list_shifts_for_worker,
     client_owns_shift,
     list_projects_for_client,
+    get_shift_with_owner,
+    mark_assignment_event_by_shift_worker,
+    set_extension_request,
+    resolve_extension_request,
+    extend_shift_end_time,
 )
-from states import CheckinFlow, CheckoutFlow
+from config import ADMIN_USER_ID
+from states import CheckinFlow, CheckoutFlow, ShiftExtensionFlow, ClientMessageWorkerFlow
 
 router = Router()
 
@@ -48,6 +55,10 @@ def _shift_geo_limits(shift: tuple | None) -> tuple[float | None, float | None, 
     lng = shift[10]
     radius = int(shift[11] or 300)
     return lat, lng, radius
+
+
+def _shift_start(shift: tuple) -> datetime:
+    return datetime.strptime(f"{shift[2]} {shift[3]}", "%Y-%m-%d %H:%M")
 
 
 @router.callback_query(F.data == "my_shifts")
@@ -188,6 +199,7 @@ async def shift_detail(callback: types.CallbackQuery):
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="📋 Поставить задачу", callback_data=f"add_task_{shift_id}")],
+            [InlineKeyboardButton(text="✉️ Написать исполнителю", callback_data=f"msg_worker_pick_{shift_id}")],
             [InlineKeyboardButton(text="💬 Чат смены", callback_data=f"chat_{shift_id}")],
             [InlineKeyboardButton(text="📊 Отчёт", callback_data=f"report_{shift_id}")],
             [InlineKeyboardButton(text="🔙 Назад", callback_data="my_shifts")],
@@ -263,6 +275,14 @@ async def confirm_shift(callback: types.CallbackQuery):
     shift_id = int(callback.data.replace("confirm_shift_", ""))
     user_id = callback.from_user.id
     confirm_assignment(shift_id, user_id)
+    shift_owner = get_shift_with_owner(shift_id)
+    txt = f"✅ Исполнитель {callback.from_user.full_name} подтвердил выход на смену #{shift_id}."
+    try:
+        await callback.bot.send_message(int(ADMIN_USER_ID), txt)
+        if shift_owner and shift_owner[7]:
+            await callback.bot.send_message(int(shift_owner[7]), txt)
+    except Exception:
+        pass
     await callback.message.edit_text(
         f"✅ Вы подтвердили выход на смену #{shift_id}!",
         reply_markup=InlineKeyboardMarkup(
@@ -323,6 +343,23 @@ async def checkin_photo_received(message: types.Message, state: FSMContext):
     data = await state.get_data()
     shift_id = data["checkin_shift_id"]
     do_checkin(shift_id, message.from_user.id, photo_id)
+    shift_owner = get_shift_with_owner(int(shift_id))
+    if shift_owner:
+        dt_start = _shift_start(shift_owner)
+        if datetime.now() > dt_start:
+            mark_assignment_event_by_shift_worker(int(shift_id), message.from_user.id, "late_checkin_notified_at")
+            delay_min = int((datetime.now() - dt_start).total_seconds() // 60)
+            late_text = (
+                f"⚠️ Исполнитель {message.from_user.full_name} отметил чек-ин по смене #{shift_id} "
+                f"с опозданием на {max(delay_min, 1)} мин."
+            )
+            try:
+                await message.bot.send_message(int(ADMIN_USER_ID), late_text)
+                client_id = shift_owner[7]
+                if client_id:
+                    await message.bot.send_message(int(client_id), late_text)
+            except Exception:
+                pass
     await message.answer("✅ *Чек-ин выполнен!* Удачной смены! 🚀", parse_mode="Markdown")
     await state.clear()
 
@@ -390,6 +427,172 @@ async def checkout_skip_photo(message: types.Message, state: FSMContext):
         await state.clear()
     else:
         await message.answer("Отправьте фото или `0` чтобы пропустить.")
+
+
+@router.callback_query(F.data.startswith("forgot_close_"))
+async def forgot_close_shift(callback: types.CallbackQuery):
+    shift_id = int(callback.data.replace("forgot_close_", ""))
+    do_checkout(shift_id, callback.from_user.id, None)
+    await callback.message.edit_text("✅ Смена закрыта. Спасибо!")
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("forgot_extend_"))
+async def forgot_extend_shift(callback: types.CallbackQuery, state: FSMContext):
+    shift_id = int(callback.data.replace("forgot_extend_", ""))
+    await state.update_data(extend_shift_id=shift_id)
+    await state.set_state(ShiftExtensionFlow.minutes)
+    await callback.message.answer("⏱ На сколько минут продлить смену? Введите число, например `60`.", parse_mode="Markdown")
+    await callback.answer()
+
+
+@router.message(ShiftExtensionFlow.minutes)
+async def forgot_extend_minutes(message: types.Message, state: FSMContext):
+    raw = (message.text or "").strip()
+    if not raw.isdigit():
+        await message.answer("Введите число минут, например `60`.", parse_mode="Markdown")
+        return
+    minutes = int(raw)
+    if minutes < 15 or minutes > 240:
+        await message.answer("Допустимый диапазон продления: 15..240 минут.")
+        return
+    data = await state.get_data()
+    shift_id = int(data.get("extend_shift_id"))
+    ok = set_extension_request(shift_id, message.from_user.id, minutes)
+    if not ok:
+        await message.answer("❌ Не удалось отправить запрос на продление.")
+        await state.clear()
+        return
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Подтвердить продление", callback_data=f"admin_ext_ok_{shift_id}_{message.from_user.id}_{minutes}")],
+            [InlineKeyboardButton(text="❌ Отказать", callback_data=f"admin_ext_no_{shift_id}_{message.from_user.id}_{minutes}")],
+        ]
+    )
+    await message.bot.send_message(
+        int(ADMIN_USER_ID),
+        f"⏱ Запрос продления смены #{shift_id} на {minutes} минут от исполнителя {message.from_user.full_name}.",
+        reply_markup=kb,
+    )
+    shift_owner = get_shift_with_owner(shift_id)
+    if shift_owner and shift_owner[7]:
+        await message.bot.send_message(
+            int(shift_owner[7]),
+            f"ℹ️ Исполнитель запросил продление смены #{shift_id} на {minutes} минут. Ожидается решение администратора.",
+        )
+    await message.answer("✅ Запрос отправлен администратору. Ждём решение.")
+    await state.clear()
+
+
+@router.callback_query(F.data.startswith("admin_ext_ok_"))
+async def admin_extension_approve(callback: types.CallbackQuery):
+    if callback.from_user.id != int(ADMIN_USER_ID):
+        await callback.answer("Нет доступа.", show_alert=True)
+        return
+    _, _, _, shift_raw, worker_raw, min_raw = callback.data.split("_", 5)
+    shift_id = int(shift_raw)
+    worker_id = int(worker_raw)
+    minutes = int(min_raw)
+    resolve_extension_request(shift_id, worker_id, approved=True)
+    extend_shift_end_time(shift_id, minutes)
+    await callback.bot.send_message(worker_id, f"✅ Продление смены #{shift_id} на {minutes} минут одобрено администратором.")
+    await callback.message.edit_text(f"✅ Продление по смене #{shift_id} одобрено.")
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("admin_ext_no_"))
+async def admin_extension_reject(callback: types.CallbackQuery):
+    if callback.from_user.id != int(ADMIN_USER_ID):
+        await callback.answer("Нет доступа.", show_alert=True)
+        return
+    _, _, _, shift_raw, worker_raw, min_raw = callback.data.split("_", 5)
+    shift_id = int(shift_raw)
+    worker_id = int(worker_raw)
+    minutes = int(min_raw)
+    resolve_extension_request(shift_id, worker_id, approved=False)
+    do_checkout(shift_id, worker_id, None)
+    await callback.bot.send_message(worker_id, f"❌ Продление на {minutes} минут отклонено. Смена #{shift_id} закрыта.")
+    await callback.message.edit_text(f"✅ Продление по смене #{shift_id} отклонено, смена закрыта.")
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("msg_worker_pick_"))
+async def client_pick_worker_to_message(callback: types.CallbackQuery):
+    shift_id = int(callback.data.replace("msg_worker_pick_", ""))
+    user_id = callback.from_user.id
+    if not get_client(user_id) or not client_owns_shift(user_id, shift_id):
+        await callback.answer("Нет доступа.", show_alert=True)
+        return
+    assignments = get_shift_assignments(shift_id)
+    if not assignments:
+        await callback.message.edit_text(
+            "❌ На смену пока никто не назначен.",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text="🔙 Назад", callback_data=f"shift_detail_{shift_id}")]]
+            ),
+        )
+        await callback.answer()
+        return
+    rows = []
+    for a in assignments:
+        worker_id = int(a[2])
+        worker_name = a[A_FULL_NAME] if len(a) > A_FULL_NAME else f"id {worker_id}"
+        rows.append([InlineKeyboardButton(text=f"{worker_name}", callback_data=f"msg_worker_to_{shift_id}_{worker_id}")])
+    rows.append([InlineKeyboardButton(text="🔙 Назад", callback_data=f"shift_detail_{shift_id}")])
+    await callback.message.edit_text(
+        "✉️ Выберите исполнителя, которому отправить сообщение:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("msg_worker_to_"))
+async def client_message_worker_start(callback: types.CallbackQuery, state: FSMContext):
+    raw = callback.data.replace("msg_worker_to_", "")
+    parts = raw.split("_")
+    if len(parts) != 2 or not parts[0].isdigit() or not parts[1].isdigit():
+        await callback.answer()
+        return
+    shift_id = int(parts[0])
+    worker_id = int(parts[1])
+    user_id = callback.from_user.id
+    if not get_client(user_id) or not client_owns_shift(user_id, shift_id):
+        await callback.answer("Нет доступа.", show_alert=True)
+        return
+    await state.update_data(client_msg_shift_id=shift_id, client_msg_worker_id=worker_id)
+    await state.set_state(ClientMessageWorkerFlow.text)
+    await callback.message.answer("Введите текст сообщения исполнителю:")
+    await callback.answer()
+
+
+@router.message(ClientMessageWorkerFlow.text)
+async def client_message_worker_send(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    shift_id = int(data.get("client_msg_shift_id"))
+    worker_id = int(data.get("client_msg_worker_id"))
+    client_row = get_client(message.from_user.id)
+    if not client_row or not client_owns_shift(message.from_user.id, shift_id):
+        await message.answer("❌ Сессия недействительна.")
+        await state.clear()
+        return
+    sender = client_row[2] or "Заказчик"
+    text = (message.text or "").strip()
+    if not text:
+        await message.answer("❌ Пустое сообщение нельзя отправить.")
+        return
+    try:
+        await message.bot.send_message(
+            worker_id,
+            "📩 *Сообщение от заказчика*\n\n"
+            f"Смена #{shift_id}\n"
+            f"От: {sender}\n\n"
+            f"{text}",
+            parse_mode="Markdown",
+        )
+        await message.answer("✅ Сообщение отправлено исполнителю.")
+    except Exception:
+        await message.answer("❌ Не удалось отправить сообщение исполнителю.")
+    await state.clear()
 
 
 @router.callback_query(F.data.startswith("report_"))

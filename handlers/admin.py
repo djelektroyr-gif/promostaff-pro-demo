@@ -14,6 +14,7 @@ from db import (
     create_project,
     create_shift,
     get_workers,
+    get_workers_assignable,
     get_worker_assignment_stats,
     get_worker_status_counts,
     set_worker_status,
@@ -804,14 +805,14 @@ async def admin_assign_list_shifts(callback: types.CallbackQuery):
 @admin_only
 async def admin_assign_list_workers(callback: types.CallbackQuery):
     shift_id = int(callback.data.replace("assign_shift_", ""))
-    workers = get_workers("approved")
+    workers = get_workers_assignable()
     if not workers:
-        await callback.message.edit_text("❌ Нет исполнителей со статусом `approved`.", parse_mode="Markdown")
+        await callback.message.edit_text("❌ Нет доступных исполнителей (кроме `rejected`).", parse_mode="Markdown")
         await callback.answer()
         return
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text=f"{w[1]} ({w[3]})", callback_data=f"do_assign_{shift_id}_{w[0]}")]
+            [InlineKeyboardButton(text=f"{w[1]} ({w[3]}) [{w[4] or 'new'}]", callback_data=f"do_assign_{shift_id}_{w[0]}")]
             for w in workers
         ]
         + [[InlineKeyboardButton(text="🔙 Назад", callback_data="admin_assign")]]
@@ -828,6 +829,18 @@ async def admin_do_assign(callback: types.CallbackQuery):
     worker_id = int(parts[3])
     assign_worker(shift_id, worker_id)
     log_admin_action(callback.from_user.id, "assign_worker", "shift", shift_id, f"worker_id={worker_id}")
+    shift = list(filter(lambda x: int(x[0]) == int(shift_id), list_shifts_admin(100)))
+    shift_line = ""
+    if shift:
+        s = shift[0]
+        shift_line = f"\n📅 {s[1]} {s[2]}-{s[3]} | {s[4]}"
+    try:
+        await callback.bot.send_message(
+            worker_id,
+            f"📌 Вас назначили на смену #{shift_id}.{shift_line}\n\nОткройте «Мои смены» и подтвердите выход.",
+        )
+    except Exception:
+        pass
     await callback.message.edit_text(f"✅ Исполнитель `{worker_id}` назначен на смену #{shift_id}")
     await callback.answer()
 

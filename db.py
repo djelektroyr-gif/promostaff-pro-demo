@@ -89,6 +89,33 @@ def init_db():
         )
     """
     )
+    # Миграция assignments: служебные поля уведомлений/эскалаций/продлений.
+    cur.execute("PRAGMA table_info(assignments)")
+    assignment_cols = {r[1] for r in cur.fetchall()}
+    if "assigned_notify_sent_at" not in assignment_cols:
+        cur.execute("ALTER TABLE assignments ADD COLUMN assigned_notify_sent_at TIMESTAMP")
+    if "reminder_12h_sent_at" not in assignment_cols:
+        cur.execute("ALTER TABLE assignments ADD COLUMN reminder_12h_sent_at TIMESTAMP")
+    if "reminder_3h_sent_at" not in assignment_cols:
+        cur.execute("ALTER TABLE assignments ADD COLUMN reminder_3h_sent_at TIMESTAMP")
+    if "escalation_1h_sent_at" not in assignment_cols:
+        cur.execute("ALTER TABLE assignments ADD COLUMN escalation_1h_sent_at TIMESTAMP")
+    if "checkin_30m_sent_at" not in assignment_cols:
+        cur.execute("ALTER TABLE assignments ADD COLUMN checkin_30m_sent_at TIMESTAMP")
+    if "checkout_30m_sent_at" not in assignment_cols:
+        cur.execute("ALTER TABLE assignments ADD COLUMN checkout_30m_sent_at TIMESTAMP")
+    if "forgot_checkout_sent_at" not in assignment_cols:
+        cur.execute("ALTER TABLE assignments ADD COLUMN forgot_checkout_sent_at TIMESTAMP")
+    if "late_checkin_notified_at" not in assignment_cols:
+        cur.execute("ALTER TABLE assignments ADD COLUMN late_checkin_notified_at TIMESTAMP")
+    if "extension_request_minutes" not in assignment_cols:
+        cur.execute("ALTER TABLE assignments ADD COLUMN extension_request_minutes INTEGER")
+    if "extension_request_status" not in assignment_cols:
+        cur.execute("ALTER TABLE assignments ADD COLUMN extension_request_status TEXT")
+    if "extension_requested_at" not in assignment_cols:
+        cur.execute("ALTER TABLE assignments ADD COLUMN extension_requested_at TIMESTAMP")
+    if "extension_resolved_at" not in assignment_cols:
+        cur.execute("ALTER TABLE assignments ADD COLUMN extension_resolved_at TIMESTAMP")
 
     cur.execute(
         """
@@ -232,6 +259,34 @@ def get_workers(status: str | None = None) -> list:
             ORDER BY registered_at DESC
             """
         )
+    rows = cur.fetchall()
+    conn.close()
+    return rows
+
+
+def get_workers_assignable() -> list:
+    """
+    Исполнители, доступные для назначения:
+    все, кроме явно отклонённых (rejected).
+    Приоритет в выдаче: approved -> reviewed -> new -> прочие.
+    """
+    conn = db_connect()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT user_id, full_name, phone, profession, status
+        FROM workers
+        WHERE COALESCE(status, 'new') != 'rejected'
+        ORDER BY
+            CASE COALESCE(status, 'new')
+                WHEN 'approved' THEN 0
+                WHEN 'reviewed' THEN 1
+                WHEN 'new' THEN 2
+                ELSE 3
+            END,
+            registered_at DESC
+        """
+    )
     rows = cur.fetchall()
     conn.close()
     return rows
@@ -694,6 +749,18 @@ def get_assignment(shift_id: int, worker_id: int):
     return row
 
 
+def get_assignment_status(shift_id: int, worker_id: int) -> str | None:
+    conn = db_connect()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT status FROM assignments WHERE shift_id = ? AND worker_id = ?",
+        (shift_id, worker_id),
+    )
+    row = cur.fetchone()
+    conn.close()
+    return row[0] if row else None
+
+
 def get_shift_assignments(shift_id: int) -> list:
     conn = db_connect()
     cur = conn.cursor()
@@ -754,6 +821,167 @@ def do_checkout(shift_id: int, worker_id: int, photo_url: str | None = None):
 
     conn.commit()
     conn.close()
+
+
+def get_shift_with_owner(shift_id: int):
+    """Данные смены + заказчик проекта."""
+    conn = db_connect()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT s.id, s.shift_date, s.start_time, s.end_time, s.location, s.rate, s.status,
+               p.client_id, p.name
+        FROM shifts s
+        JOIN projects p ON s.project_id = p.id
+        WHERE s.id = ?
+        """,
+        (shift_id,),
+    )
+    row = cur.fetchone()
+    conn.close()
+    return row
+
+
+def list_assignments_for_scheduler() -> list:
+    """Срез назначений для фоновых уведомлений."""
+    conn = db_connect()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT
+            a.id, a.shift_id, a.worker_id, a.status,
+            a.assigned_notify_sent_at, a.reminder_12h_sent_at, a.reminder_3h_sent_at,
+            a.escalation_1h_sent_at, a.checkin_30m_sent_at, a.checkout_30m_sent_at,
+            a.forgot_checkout_sent_at, a.late_checkin_notified_at,
+            a.extension_request_minutes, a.extension_request_status,
+            s.shift_date, s.start_time, s.end_time, s.location, s.status,
+            p.client_id,
+            w.full_name
+        FROM assignments a
+        JOIN shifts s ON s.id = a.shift_id
+        JOIN projects p ON p.id = s.project_id
+        LEFT JOIN workers w ON w.user_id = a.worker_id
+        WHERE s.status IN ('open', 'in_progress')
+        """
+    )
+    rows = cur.fetchall()
+    conn.close()
+    return rows
+
+
+def mark_assignment_event(assignment_id: int, field: str) -> None:
+    allowed = {
+        "assigned_notify_sent_at",
+        "reminder_12h_sent_at",
+        "reminder_3h_sent_at",
+        "escalation_1h_sent_at",
+        "checkin_30m_sent_at",
+        "checkout_30m_sent_at",
+        "forgot_checkout_sent_at",
+        "late_checkin_notified_at",
+    }
+    if field not in allowed:
+        return
+    conn = db_connect()
+    cur = conn.cursor()
+    cur.execute(f"UPDATE assignments SET {field} = CURRENT_TIMESTAMP WHERE id = ?", (assignment_id,))
+    conn.commit()
+    conn.close()
+
+
+def mark_assignment_event_by_shift_worker(shift_id: int, worker_id: int, field: str) -> None:
+    allowed = {
+        "assigned_notify_sent_at",
+        "reminder_12h_sent_at",
+        "reminder_3h_sent_at",
+        "escalation_1h_sent_at",
+        "checkin_30m_sent_at",
+        "checkout_30m_sent_at",
+        "forgot_checkout_sent_at",
+        "late_checkin_notified_at",
+    }
+    if field not in allowed:
+        return
+    conn = db_connect()
+    cur = conn.cursor()
+    cur.execute(
+        f"UPDATE assignments SET {field} = CURRENT_TIMESTAMP WHERE shift_id = ? AND worker_id = ?",
+        (shift_id, worker_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def set_extension_request(shift_id: int, worker_id: int, minutes: int) -> bool:
+    conn = db_connect()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        UPDATE assignments
+        SET extension_request_minutes = ?, extension_request_status = 'pending',
+            extension_requested_at = CURRENT_TIMESTAMP, extension_resolved_at = NULL
+        WHERE shift_id = ? AND worker_id = ? AND status = 'checked_in'
+        """,
+        (minutes, shift_id, worker_id),
+    )
+    ok = cur.rowcount > 0
+    conn.commit()
+    conn.close()
+    return ok
+
+
+def get_pending_extension(shift_id: int, worker_id: int):
+    conn = db_connect()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT extension_request_minutes, extension_request_status
+        FROM assignments
+        WHERE shift_id = ? AND worker_id = ?
+        """,
+        (shift_id, worker_id),
+    )
+    row = cur.fetchone()
+    conn.close()
+    return row
+
+
+def resolve_extension_request(shift_id: int, worker_id: int, approved: bool) -> bool:
+    conn = db_connect()
+    cur = conn.cursor()
+    status = "approved" if approved else "rejected"
+    cur.execute(
+        """
+        UPDATE assignments
+        SET extension_request_status = ?, extension_resolved_at = CURRENT_TIMESTAMP
+        WHERE shift_id = ? AND worker_id = ? AND extension_request_status = 'pending'
+        """,
+        (status, shift_id, worker_id),
+    )
+    ok = cur.rowcount > 0
+    conn.commit()
+    conn.close()
+    return ok
+
+
+def extend_shift_end_time(shift_id: int, minutes: int) -> bool:
+    conn = db_connect()
+    cur = conn.cursor()
+    cur.execute("SELECT end_time FROM shifts WHERE id = ?", (shift_id,))
+    row = cur.fetchone()
+    if not row:
+        conn.close()
+        return False
+    try:
+        t = datetime.strptime(str(row[0]), "%H:%M")
+    except Exception:
+        conn.close()
+        return False
+    t2 = t + timedelta(minutes=minutes)
+    cur.execute("UPDATE shifts SET end_time = ? WHERE id = ?", (t2.strftime("%H:%M"), shift_id))
+    conn.commit()
+    conn.close()
+    return True
 
 
 # ========== ЗАДАЧИ ==========
@@ -823,6 +1051,48 @@ def get_shift_tasks(shift_id: int) -> list:
     conn = db_connect()
     cur = conn.cursor()
     cur.execute("SELECT * FROM tasks WHERE shift_id = ?", (shift_id,))
+    rows = cur.fetchall()
+    conn.close()
+    return rows
+
+
+def get_task(task_id: int):
+    conn = db_connect()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM tasks WHERE id = ?", (task_id,))
+    row = cur.fetchone()
+    conn.close()
+    return row
+
+
+def list_tasks_for_client(client_user_id: int, limit: int = 200) -> list:
+    """
+    Задачи по всем сменам заказчика.
+    Возвращает: task_id, title, status, shift_id, shift_date, start_time, end_time, worker_name
+    """
+    conn = db_connect()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT
+            t.id,
+            t.title,
+            t.status,
+            s.id,
+            s.shift_date,
+            s.start_time,
+            s.end_time,
+            COALESCE(w.full_name, 'Не назначен')
+        FROM tasks t
+        JOIN shifts s ON s.id = t.shift_id
+        JOIN projects p ON p.id = s.project_id
+        LEFT JOIN workers w ON w.user_id = t.assigned_to
+        WHERE p.client_id = ?
+        ORDER BY s.shift_date DESC, t.id DESC
+        LIMIT ?
+        """,
+        (client_user_id, limit),
+    )
     rows = cur.fetchall()
     conn.close()
     return rows

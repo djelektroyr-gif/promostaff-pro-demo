@@ -7,6 +7,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from config import BOT_TOKEN
 from db import init_db
 from handlers import routers
+from services.shift_notifier import run_notifications_once
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -24,6 +25,15 @@ async def main():
     # Подключаем все роутеры
     for router in routers:
         dp.include_router(router)
+
+    async def _scheduler_loop():
+        while True:
+            try:
+                await run_notifications_once(bot)
+            except Exception:
+                logger.exception("scheduler loop failed")
+            await asyncio.sleep(60)
+    asyncio.create_task(_scheduler_loop())
     
     logger.info("🚀 Бот PROMOSTAFF DEMO запущен!")
     

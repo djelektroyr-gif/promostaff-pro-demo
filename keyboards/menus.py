@@ -7,6 +7,7 @@ def main_menu_keyboard(is_client: bool = False, is_worker: bool = False):
     if is_client:
         buttons.append([InlineKeyboardButton(text="📋 Мои проекты", callback_data="my_projects")])
         buttons.append([InlineKeyboardButton(text="📅 Мои смены", callback_data="my_shifts")])
+        buttons.append([InlineKeyboardButton(text="✅ Мои задачи", callback_data="my_client_tasks")])
         buttons.append([InlineKeyboardButton(text="➕ Создать проект", callback_data="create_project")])
     elif is_worker:
         buttons.append([InlineKeyboardButton(text="📅 Мои смены", callback_data="my_shifts")])

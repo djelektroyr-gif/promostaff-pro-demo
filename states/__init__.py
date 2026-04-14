@@ -61,3 +61,11 @@ class CheckinFlow(StatesGroup):
 class CheckoutFlow(StatesGroup):
     geo = State()
     photo = State()
+
+
+class ShiftExtensionFlow(StatesGroup):
+    minutes = State()
+
+
+class ClientMessageWorkerFlow(StatesGroup):
+    text = State()
