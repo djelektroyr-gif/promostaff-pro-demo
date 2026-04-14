@@ -5,6 +5,7 @@ import sqlite3
 from datetime import datetime, timedelta
 from pathlib import Path
 import re
+from urllib.parse import urlparse
 
 import psycopg2
 
@@ -106,6 +107,101 @@ def db_connect():
     if USE_POSTGRES:
         return _PgConnCompat(psycopg2.connect(DATABASE_URL))
     return sqlite3.connect(str(DB_PATH))
+
+
+_PG_ID_COLUMNS = (
+    ("workers", "user_id"),
+    ("clients", "user_id"),
+    ("projects", "client_id"),
+    ("assignments", "worker_id"),
+    ("tasks", "assigned_to"),
+    ("chat_messages", "user_id"),
+    ("admin_logs", "admin_user_id"),
+    ("admin_logs", "entity_id"),
+)
+
+
+def _pg_widen_telegram_id_columns(cur) -> None:
+    """INT4 → BIGINT для Telegram ID и связанных полей (без ошибки, если уже BIGINT)."""
+    for table, col in _PG_ID_COLUMNS:
+        cur.execute(
+            """
+            SELECT data_type
+            FROM information_schema.columns
+            WHERE table_schema = 'public' AND table_name = %s AND column_name = %s
+            """,
+            (table, col),
+        )
+        row = cur.fetchone()
+        if not row:
+            continue
+        dt = (row[0] or "").lower()
+        if dt == "bigint":
+            continue
+        if dt not in ("integer", "smallint"):
+            continue
+        cur.execute(
+            f"ALTER TABLE {table} ALTER COLUMN {col} TYPE BIGINT USING {col}::bigint"
+        )
+
+
+def _safe_db_url_summary() -> str:
+    if not DATABASE_URL:
+        return "(нет DATABASE_URL)"
+    try:
+        u = urlparse(DATABASE_URL)
+        host = u.hostname or "?"
+        port = f":{u.port}" if u.port else ""
+        db = (u.path or "/").strip("/") or "?"
+        return f"{u.scheme}://{host}{port}/{db}"
+    except Exception:
+        return "(не удалось разобрать DATABASE_URL)"
+
+
+def get_db_status_report() -> str:
+    """
+    Текст для диагностики (без секретов): бэкенд, доступность, типы id-колонок в Postgres.
+    """
+    lines = [
+        f"Бэкенд: {'PostgreSQL' if USE_POSTGRES else 'SQLite'}",
+        f"DSN (без пароля): {_safe_db_url_summary()}",
+    ]
+    if not USE_POSTGRES:
+        lines.append(f"Файл SQLite: {DB_PATH}")
+        try:
+            conn = db_connect()
+            cur = conn.cursor()
+            cur.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table'")
+            n = int(cur.fetchone()[0])
+            conn.close()
+            lines.append(f"SQLite: подключение OK, таблиц: {n}")
+        except Exception as e:
+            lines.append(f"SQLite: ошибка — {e}")
+        return "\n".join(lines)
+
+    try:
+        conn = db_connect()
+        cur = conn.cursor()
+        cur.execute("SELECT current_database(), version()")
+        dbname, ver = cur.fetchone()
+        lines.append(f"PostgreSQL: подключение OK")
+        lines.append(f"current_database: {dbname}")
+        lines.append(f"version: {(ver or '')[:80]}...")
+        for table, col in _PG_ID_COLUMNS:
+            cur.execute(
+                """
+                SELECT data_type
+                FROM information_schema.columns
+                WHERE table_schema = 'public' AND table_name = %s AND column_name = %s
+                """,
+                (table, col),
+            )
+            r = cur.fetchone()
+            lines.append(f"  {table}.{col}: {r[0] if r else '(нет колонки)'}")
+        conn.close()
+    except Exception as e:
+        lines.append(f"PostgreSQL: ошибка — {type(e).__name__}: {e}")
+    return "\n".join(lines)
 
 
 def init_db():
@@ -272,15 +368,9 @@ def init_db():
     if "checkin_radius_m" not in shift_cols:
         cur.execute("ALTER TABLE shifts ADD COLUMN checkin_radius_m INTEGER DEFAULT 300")
 
-    # PostgreSQL: Telegram ID могут не помещаться в INTEGER (нужен BIGINT).
+    # PostgreSQL: Telegram ID не помещаются в INTEGER — переводим в BIGINT (идемпотентно).
     if USE_POSTGRES:
-        cur.execute("ALTER TABLE workers ALTER COLUMN user_id TYPE BIGINT")
-        cur.execute("ALTER TABLE clients ALTER COLUMN user_id TYPE BIGINT")
-        cur.execute("ALTER TABLE projects ALTER COLUMN client_id TYPE BIGINT")
-        cur.execute("ALTER TABLE assignments ALTER COLUMN worker_id TYPE BIGINT")
-        cur.execute("ALTER TABLE tasks ALTER COLUMN assigned_to TYPE BIGINT")
-        cur.execute("ALTER TABLE chat_messages ALTER COLUMN user_id TYPE BIGINT")
-        cur.execute("ALTER TABLE admin_logs ALTER COLUMN admin_user_id TYPE BIGINT")
+        _pg_widen_telegram_id_columns(cur)
 
     conn.commit()
     conn.close()

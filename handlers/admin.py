@@ -13,6 +13,7 @@ from states import ProjectCreation, ShiftCreation, ShiftAdminLine
 from db import (
     create_project,
     create_shift,
+    get_db_status_report,
     get_workers,
     get_workers_assignable,
     get_worker_assignment_stats,
@@ -92,6 +93,13 @@ async def admin_panel(message: types.Message):
         reply_markup=_admin_main_keyboard(),
         parse_mode="Markdown",
     )
+
+
+@router.message(Command("db_status"))
+@admin_only
+async def db_status_cmd(message: types.Message):
+    report = get_db_status_report()
+    await message.answer("Статус БД\n\n" + report)
 
 
 @router.callback_query(F.data == "admin_metrics")
