@@ -1,6 +1,6 @@
 # handlers/shift_center.py — center of shift (timeline + traffic light) and project hub.
-from aiogram import Router, F, types
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram import Router, F
+from aiogram.types import CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 
 from config import ADMIN_USER_ID
 from db import (
@@ -102,7 +102,7 @@ def _parse_shift_hub(data: str) -> tuple[str, int] | None:
 
 
 @router.callback_query(lambda c: _parse_shift_hub(c.data or "") is not None)
-async def shift_hub_open(callback: types.CallbackQuery):
+async def shift_hub_open(callback: CallbackQuery):
     parsed = _parse_shift_hub(callback.data or "")
     if not parsed:
         await callback.answer()
@@ -148,7 +148,7 @@ async def shift_hub_open(callback: types.CallbackQuery):
 
 
 @router.callback_query(F.data.startswith("project_hub_"))
-async def project_hub_open(callback: types.CallbackQuery):
+async def project_hub_open(callback: CallbackQuery):
     pid = int(callback.data.replace("project_hub_", ""))
     uid = callback.from_user.id
     is_ad = uid == int(ADMIN_USER_ID)
