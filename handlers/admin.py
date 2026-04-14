@@ -1,4 +1,7 @@
 # handlers/admin.py
+import inspect
+from functools import wraps
+
 from aiogram import Router, F, types
 from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
@@ -25,16 +28,25 @@ def is_admin(user_id: int) -> bool:
 
 
 def admin_only(func):
+    signature = inspect.signature(func)
+    accepted_kwargs = {
+        name
+        for name, p in signature.parameters.items()
+        if p.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+    }
+
+    @wraps(func)
     async def wrapper(event, *args, **kwargs):
-        user_id = event.from_user.id
+        user = getattr(event, "from_user", None)
+        user_id = getattr(user, "id", 0)
         if not is_admin(user_id):
             if hasattr(event, "answer") and callable(getattr(event, "answer")):
                 await event.answer("⛔ У вас нет прав.", show_alert=True)
             elif hasattr(event, "message") and event.message:
                 await event.message.answer("⛔ У вас нет прав.")
             return
-        kwargs.pop("dispatcher", None)
-        return await func(event, *args, **kwargs)
+        filtered_kwargs = {k: v for k, v in kwargs.items() if k in accepted_kwargs}
+        return await func(event, *args, **filtered_kwargs)
 
     return wrapper
 
