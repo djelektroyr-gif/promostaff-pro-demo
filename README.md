@@ -66,6 +66,9 @@ python main.py
 
 `ADMIN_USER_ID` должен быть **> 0** (см. `config.py`).
 
+`DATABASE_URL` (опционально) включает режим PostgreSQL.  
+Если `DATABASE_URL` не задан, demo работает на локальном SQLite-файле.
+
 ## Быстрый e2e-прогон
 
 1. С аккаунта админа: `/admin` → **Генератор тест-данных**.

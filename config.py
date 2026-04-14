@@ -17,6 +17,7 @@ if ADMIN_USER_ID == 0:
 # Настройки проекта
 PROJECT_NAME = "Демо-проект PROMOSTAFF"
 DEFAULT_RATE = 500  # ставка ₽/час
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 
 # Время напоминаний (в часах до начала смены)
 REMINDER_12H = 12

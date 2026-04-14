@@ -4,12 +4,107 @@ from __future__ import annotations
 import sqlite3
 from datetime import datetime, timedelta
 from pathlib import Path
+import re
+
+import psycopg2
+
+from config import DATABASE_URL
 
 # База всегда рядом с кодом (не зависит от текущей директории при запуске)
 DB_PATH = Path(__file__).resolve().parent / "promostaff_demo.db"
+USE_POSTGRES = bool(DATABASE_URL)
 
 
-def db_connect() -> sqlite3.Connection:
+class _PgCursorCompat:
+    def __init__(self, cur):
+        self._cur = cur
+
+    @property
+    def lastrowid(self):
+        row = self._cur.fetchone()
+        return int(row[0]) if row else None
+
+    @property
+    def rowcount(self):
+        return self._cur.rowcount
+
+    def _convert_sql(self, sql: str) -> str:
+        s = sql
+        s = s.replace("?", "%s")
+        s = s.replace("INTEGER PRIMARY KEY AUTOINCREMENT", "BIGSERIAL PRIMARY KEY")
+        s = s.replace("INSERT OR IGNORE INTO assignments", "INSERT INTO assignments")
+        s = s.replace(
+            "INSERT OR REPLACE INTO clients (user_id, company_name, contact_name, phone)\n        VALUES (%s, %s, %s, %s)",
+            """
+        INSERT INTO clients (user_id, company_name, contact_name, phone)
+        VALUES (%s, %s, %s, %s)
+        ON CONFLICT(user_id) DO UPDATE SET
+            company_name = EXCLUDED.company_name,
+            contact_name = EXCLUDED.contact_name,
+            phone = EXCLUDED.phone
+            """.strip(),
+        )
+        return s
+
+    def execute(self, sql, params=None):
+        raw = (sql or "").strip().lower()
+        if raw.startswith("pragma table_info("):
+            table = re.sub(r"^pragma table_info\((.+)\)$", r"\1", raw)
+            table = table.strip().strip("'").strip('"')
+            self._cur.execute(
+                """
+                SELECT
+                    ordinal_position - 1 AS cid,
+                    column_name,
+                    data_type,
+                    CASE WHEN is_nullable = 'NO' THEN 1 ELSE 0 END AS notnull,
+                    column_default,
+                    0 AS pk
+                FROM information_schema.columns
+                WHERE table_schema = 'public' AND table_name = %s
+                ORDER BY ordinal_position
+                """,
+                (table,),
+            )
+            return
+        self._cur.execute(self._convert_sql(sql), params or ())
+
+    def fetchone(self):
+        return self._cur.fetchone()
+
+    def fetchall(self):
+        return self._cur.fetchall()
+
+    def __getattr__(self, item):
+        return getattr(self._cur, item)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+
+class _PgConnCompat:
+    def __init__(self, conn):
+        self._conn = conn
+
+    def cursor(self):
+        return _PgCursorCompat(self._conn.cursor())
+
+    def commit(self):
+        return self._conn.commit()
+
+    def close(self):
+        return self._conn.close()
+
+    def __getattr__(self, item):
+        return getattr(self._conn, item)
+
+
+def db_connect():
+    if USE_POSTGRES:
+        return _PgConnCompat(psycopg2.connect(DATABASE_URL))
     return sqlite3.connect(str(DB_PATH))
 
 
@@ -388,8 +483,12 @@ def save_client(user_id: int, data: dict):
     cur = conn.cursor()
     cur.execute(
         """
-        INSERT OR REPLACE INTO clients (user_id, company_name, contact_name, phone)
+        INSERT INTO clients (user_id, company_name, contact_name, phone)
         VALUES (?, ?, ?, ?)
+        ON CONFLICT(user_id) DO UPDATE SET
+            company_name = excluded.company_name,
+            contact_name = excluded.contact_name,
+            phone = excluded.phone
     """,
         (user_id, data.get("company_name"), data.get("contact_name"), data.get("phone")),
     )
@@ -445,11 +544,15 @@ def delete_client_cascade(client_user_id: int) -> None:
 def create_project(name: str, client_id: int) -> int:
     conn = db_connect()
     cur = conn.cursor()
-    cur.execute("INSERT INTO projects (name, client_id) VALUES (?, ?)", (name, client_id))
-    project_id = cur.lastrowid
+    if USE_POSTGRES:
+        cur.execute("INSERT INTO projects (name, client_id) VALUES (%s, %s) RETURNING id", (name, client_id))
+        project_id = int(cur.fetchone()[0])
+    else:
+        cur.execute("INSERT INTO projects (name, client_id) VALUES (?, ?)", (name, client_id))
+        project_id = int(cur.lastrowid)
     conn.commit()
     conn.close()
-    return int(project_id)
+    return project_id
 
 
 def delete_project_cascade(project_id: int) -> dict:
@@ -523,7 +626,31 @@ def create_shift(project_id: int, data: dict) -> int:
     date_iso = normalize_shift_date(data["date"])
     conn = db_connect()
     cur = conn.cursor()
-    cur.execute(
+    if USE_POSTGRES:
+        cur.execute(
+            """
+        INSERT INTO shifts (
+            project_id, shift_date, start_time, end_time, location, rate,
+            expected_lat, expected_lng, checkin_radius_m
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        RETURNING id
+    """,
+            (
+                project_id,
+                date_iso,
+                data["start_time"],
+                data["end_time"],
+                data["location"],
+                data.get("rate", 500),
+                data.get("expected_lat"),
+                data.get("expected_lng"),
+                data.get("checkin_radius_m", 300),
+            ),
+        )
+        shift_id = int(cur.fetchone()[0])
+    else:
+        cur.execute(
         """
         INSERT INTO shifts (
             project_id, shift_date, start_time, end_time, location, rate,
@@ -543,10 +670,10 @@ def create_shift(project_id: int, data: dict) -> int:
             data.get("checkin_radius_m", 300),
         ),
     )
-    shift_id = cur.lastrowid
+        shift_id = int(cur.lastrowid)
     conn.commit()
     conn.close()
-    return int(shift_id)
+    return shift_id
 
 
 def get_shifts_by_project(project_id: int) -> list:
@@ -662,10 +789,13 @@ def assign_worker(shift_id: int, worker_id: int):
     cur = conn.cursor()
     cur.execute(
         """
-        INSERT OR IGNORE INTO assignments (shift_id, worker_id, status)
-        VALUES (?, ?, 'pending')
+        INSERT INTO assignments (shift_id, worker_id, status)
+        SELECT ?, ?, 'pending'
+        WHERE NOT EXISTS (
+            SELECT 1 FROM assignments WHERE shift_id = ? AND worker_id = ?
+        )
     """,
-        (shift_id, worker_id),
+        (shift_id, worker_id, shift_id, worker_id),
     )
     conn.commit()
     conn.close()
@@ -988,17 +1118,28 @@ def extend_shift_end_time(shift_id: int, minutes: int) -> bool:
 def create_task(shift_id: int, title: str, description: str, assigned_to: int | None = None) -> int:
     conn = db_connect()
     cur = conn.cursor()
-    cur.execute(
+    if USE_POSTGRES:
+        cur.execute(
+            """
+        INSERT INTO tasks (shift_id, title, description, assigned_to)
+        VALUES (%s, %s, %s, %s)
+        RETURNING id
+    """,
+            (shift_id, title, description, assigned_to),
+        )
+        task_id = int(cur.fetchone()[0])
+    else:
+        cur.execute(
         """
         INSERT INTO tasks (shift_id, title, description, assigned_to)
         VALUES (?, ?, ?, ?)
     """,
         (shift_id, title, description, assigned_to),
     )
-    task_id = cur.lastrowid
+        task_id = int(cur.lastrowid)
     conn.commit()
     conn.close()
-    return int(task_id)
+    return task_id
 
 
 def get_worker_tasks(shift_id: int, worker_id: int) -> list:
@@ -1260,10 +1401,16 @@ def seed_demo_data() -> dict:
             row,
         )
 
-    cur.execute("INSERT INTO projects (name, client_id) VALUES (?, ?)", ("Выставка PRO Demo", base_c + 1))
-    p1 = int(cur.lastrowid)
-    cur.execute("INSERT INTO projects (name, client_id) VALUES (?, ?)", ("Промо-акция Весна", base_c + 2))
-    p2 = int(cur.lastrowid)
+    if USE_POSTGRES:
+        cur.execute("INSERT INTO projects (name, client_id) VALUES (%s, %s) RETURNING id", ("Выставка PRO Demo", base_c + 1))
+        p1 = int(cur.fetchone()[0])
+        cur.execute("INSERT INTO projects (name, client_id) VALUES (%s, %s) RETURNING id", ("Промо-акция Весна", base_c + 2))
+        p2 = int(cur.fetchone()[0])
+    else:
+        cur.execute("INSERT INTO projects (name, client_id) VALUES (?, ?)", ("Выставка PRO Demo", base_c + 1))
+        p1 = int(cur.lastrowid)
+        cur.execute("INSERT INTO projects (name, client_id) VALUES (?, ?)", ("Промо-акция Весна", base_c + 2))
+        p2 = int(cur.lastrowid)
 
     today = datetime.now().date()
     shifts = [
@@ -1274,14 +1421,25 @@ def seed_demo_data() -> dict:
     ]
     shift_ids: list[int] = []
     for s in shifts:
-        cur.execute(
-            """
-            INSERT INTO shifts (project_id, shift_date, start_time, end_time, location, rate, status)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
-            s,
-        )
-        shift_ids.append(int(cur.lastrowid))
+        if USE_POSTGRES:
+            cur.execute(
+                """
+                INSERT INTO shifts (project_id, shift_date, start_time, end_time, location, rate, status)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                RETURNING id
+                """,
+                s,
+            )
+            shift_ids.append(int(cur.fetchone()[0]))
+        else:
+            cur.execute(
+                """
+                INSERT INTO shifts (project_id, shift_date, start_time, end_time, location, rate, status)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                s,
+            )
+            shift_ids.append(int(cur.lastrowid))
 
     assignments = [
         (shift_ids[0], base_w + 1, "pending"),
@@ -1292,10 +1450,13 @@ def seed_demo_data() -> dict:
     for a in assignments:
         cur.execute(
             """
-            INSERT OR IGNORE INTO assignments (shift_id, worker_id, status)
-            VALUES (?, ?, ?)
+            INSERT INTO assignments (shift_id, worker_id, status)
+            SELECT ?, ?, ?
+            WHERE NOT EXISTS (
+                SELECT 1 FROM assignments WHERE shift_id = ? AND worker_id = ?
+            )
             """,
-            a,
+            (a[0], a[1], a[2], a[0], a[1]),
         )
 
     tasks = [
