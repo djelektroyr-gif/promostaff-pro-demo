@@ -33,6 +33,7 @@ from db import (
     delete_client_cascade,
     list_projects_admin,
     list_shifts_admin,
+    format_date_ru,
 )
 
 router = Router()
@@ -508,7 +509,7 @@ async def admin_project_manage(callback: types.CallbackQuery):
         text += f"• #{pid} — {name} | клиент: {company_name or contact_name or client_id}\n"
         rows.append(
             [
-                InlineKeyboardButton(text=f"📌 Центр #{pid}", callback_data=f"project_hub_{pid}"),
+                InlineKeyboardButton(text=f"📌 Проект: сводка #{pid}", callback_data=f"project_hub_{pid}"),
                 InlineKeyboardButton(text=f"🗑 Удалить #{pid}", callback_data=f"admin_project_delask_{pid}"),
             ]
         )
@@ -887,8 +888,8 @@ async def admin_shift_manage_list(callback: types.CallbackQuery):
     text = "🗓 *Управление сменами*\n\n"
     for s in shifts:
         sid, date, st, et, project_name, status = s
-        text += f"• #{sid} {date} {st}-{et} | {project_name} | {status}\n"
-        rows.append([InlineKeyboardButton(text=f"🎯 Центр #{sid}", callback_data=f"shift_hub_ad_{sid}")])
+        text += f"• #{sid} {format_date_ru(str(date))} {st}-{et} | {project_name} | {status}\n"
+        rows.append([InlineKeyboardButton(text=f"🎯 Сводка смены #{sid}", callback_data=f"shift_hub_ad_{sid}")])
         rows.append([InlineKeyboardButton(text=f"🛑 Закрыть #{sid}", callback_data=f"admin_shift_close_{sid}")])
         rows.append([InlineKeyboardButton(text=f"🗑 Удалить #{sid}", callback_data=f"admin_shift_delask_{sid}")])
     rows.append([InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back")])

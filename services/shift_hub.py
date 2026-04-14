@@ -4,6 +4,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from services.shift_notifier import _shift_start_end
+from db import format_date_ru
 
 I_ASSIGNED_NOTIFY = 11
 I_REMINDER_12H = 12
@@ -144,8 +145,8 @@ def format_shift_hub(
     tasks = rep.get("tasks") or []
 
     lines = [
-        f"{W} *\u0426\u0435\u043d\u0442\u0440 \u0441\u043c\u0435\u043d\u044b #{shift_id}*",
-        f"\u0414\u0430\u0442\u0430: {shift_date} {st_t}\u2013{en_t}",
+        f"{W} *\u0413\u043b\u0430\u0432\u043d\u043e\u0435 \u043f\u043e \u0441\u043c\u0435\u043d\u0435 #{shift_id}*",
+        f"\u0414\u0430\u0442\u0430: {format_date_ru(shift_date)} {st_t}\u2013{en_t}",
         f"\u041b\u043e\u043a\u0430\u0446\u0438\u044f: {loc}",
     ]
     if include_pay:

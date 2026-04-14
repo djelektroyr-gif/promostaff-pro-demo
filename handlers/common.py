@@ -39,7 +39,9 @@ async def _send_group_onboarding(message: types.Message) -> None:
         "Чем могу помочь:\n"
         "• регистрация заказчика и исполнителей;\n"
         "• доступ к сменам, задачам, чату и отчётам;\n"
-        "• быстрый вход в нужный сценарий по кнопкам ниже.",
+        "• быстрый вход в нужный сценарий по кнопкам ниже.\n\n"
+        "Если приветствие пропало: в этом чате можно написать команду /start или /promostaff "
+        "(с косой чертой в начале, как обычная команда в Telegram).",
         parse_mode="Markdown",
         reply_markup=keyboard,
     )
@@ -47,11 +49,8 @@ async def _send_group_onboarding(message: types.Message) -> None:
 
 @router.message(Command("start"))
 async def start_cmd(message: types.Message, state: FSMContext):
-    # В группах /start не запускает личный сценарий.
     if message.chat.type in ("group", "supergroup"):
-        await message.answer(
-            "Для регистрации откройте бота в личных сообщениях по кнопкам из приветствия."
-        )
+        await _send_group_onboarding(message)
         return
 
     user_id = message.from_user.id
@@ -111,6 +110,13 @@ async def group_bot_added(message: types.Message):
     me = await message.bot.get_me()
     added_ids = {u.id for u in (message.new_chat_members or [])}
     if me.id not in added_ids:
+        return
+    await _send_group_onboarding(message)
+
+
+@router.message(Command("promostaff"))
+async def promostaff_group_cmd(message: types.Message):
+    if message.chat.type not in ("group", "supergroup"):
         return
     await _send_group_onboarding(message)
 

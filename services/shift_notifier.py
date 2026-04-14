@@ -10,6 +10,7 @@ from config import ADMIN_USER_ID
 from db import (
     list_assignments_for_scheduler,
     mark_assignment_event,
+    format_date_ru,
 )
 
 logger = logging.getLogger(__name__)
@@ -68,7 +69,7 @@ async def run_notifications_once(bot: Bot) -> None:
                     int(worker_id),
                     "📌 *Вас назначили на смену*\n\n"
                     f"Смена #{shift_id}\n"
-                    f"Дата: {shift_date}\n"
+                    f"Дата: {format_date_ru(str(shift_date))}\n"
                     f"Время: {start_time}-{end_time}\n"
                     f"Локация: {location}\n\n"
                     "Подтвердите выход в карточке смены.",
@@ -93,7 +94,7 @@ async def run_notifications_once(bot: Bot) -> None:
                 if escalation_1h_sent_at is None and 0 < to_start <= 3600:
                     txt = (
                         f"⚠️ Исполнитель {worker_name or worker_id} не подтвердил выход на смену #{shift_id}. "
-                        f"Старт: {shift_date} {start_time}."
+                        f"Старт: {format_date_ru(str(shift_date))} {start_time}."
                     )
                     await bot.send_message(int(ADMIN_USER_ID), txt)
                     if client_id:

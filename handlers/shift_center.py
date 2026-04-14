@@ -13,6 +13,7 @@ from db import (
     get_project,
     get_shifts_by_project,
     get_assignment,
+    format_date_ru,
 )
 from services.shift_hub import format_shift_hub
 
@@ -164,18 +165,18 @@ async def project_hub_open(callback: CallbackQuery):
         return
     pname = pr[1]
     shifts = get_shifts_by_project(pid)
-    text = f"*\u0426\u0435\u043d\u0442\u0440 \u043f\u0440\u043e\u0435\u043a\u0442\u0430 #{pid}*\n{pname}\n\n*\u0421\u043c\u0435\u043d\u044b:*\n"
+    text = f"*\u0413\u043b\u0430\u0432\u043d\u043e\u0435 \u043f\u043e \u043f\u0440\u043e\u0435\u043a\u0442\u0443 #{pid}*\n{pname}\n\n*\u0421\u043c\u0435\u043d\u044b:*\n"
     if not shifts:
         text += "\u041f\u043e\u043a\u0430 \u043d\u0435\u0442 \u0441\u043c\u0435\u043d.\n"
     rows = []
     hub_cb = "shift_hub_ad" if is_ad else "shift_hub_cl" if is_cl else "shift_hub_wk"
     for s in shifts[:20]:
         sid = int(s[0])
-        text += f"• #{sid} {s[2]} {s[3]}-{s[4]}\n"
+        text += f"• #{sid} {format_date_ru(s[2])} {s[3]}-{s[4]}\n"
         rows.append(
             [
                 InlineKeyboardButton(
-                    text=f"\u0426\u0435\u043d\u0442\u0440 #{sid}",
+                    text=f"\u0421\u043c\u0435\u043d\u0430 #{sid} \u2192 \u043f\u043e\u0434\u0440\u043e\u0431\u043d\u043e",
                     callback_data=f"{hub_cb}_{sid}",
                 ),
                 InlineKeyboardButton(text="\u0427\u0430\u0442", callback_data=f"chat_{sid}"),

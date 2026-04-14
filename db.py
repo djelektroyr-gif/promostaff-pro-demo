@@ -390,6 +390,13 @@ def init_db():
     if "checkin_radius_m" not in shift_cols:
         cur.execute("ALTER TABLE shifts ADD COLUMN checkin_radius_m INTEGER DEFAULT 300")
 
+    cur.execute("PRAGMA table_info(tasks)")
+    task_cols = {r[1] for r in cur.fetchall()}
+    if "client_rating" not in task_cols:
+        cur.execute("ALTER TABLE tasks ADD COLUMN client_rating INTEGER")
+    if "client_rated_at" not in task_cols:
+        cur.execute("ALTER TABLE tasks ADD COLUMN client_rated_at TIMESTAMP")
+
     # PostgreSQL: Telegram ID не помещаются в INTEGER — переводим в BIGINT (идемпотентно).
     if USE_POSTGRES:
         _pg_widen_telegram_id_columns(cur)
@@ -410,6 +417,15 @@ def normalize_shift_date(date_in: str) -> str:
         if len(y) == 4 and d.isdigit() and m.isdigit():
             return f"{y}-{m.zfill(2)}-{d.zfill(2)}"
     raise ValueError("Дата: ДД.ММ.ГГГГ или ГГГГ-ММ-ДД")
+
+
+def format_date_ru(iso_or_any) -> str:
+    """ГГГГ-ММ-ДД (или date) → ДД.ММ.ГГГГ для показа пользователю."""
+    s = str(iso_or_any or "").strip()
+    if len(s) >= 10 and s[4] == "-" and s[7] == "-":
+        y, m, d = s[0:4], s[5:7], s[8:10]
+        return f"{d}.{m}.{y}"
+    return s
 
 
 def _parse_sqlite_ts(value) -> datetime:
@@ -1410,7 +1426,7 @@ def get_task(task_id: int):
 def list_tasks_for_client(client_user_id: int, limit: int = 200) -> list:
     """
     Задачи по всем сменам заказчика.
-    Возвращает: task_id, title, status, shift_id, shift_date, start_time, end_time, worker_name
+    Возвращает: task_id, title, status, shift_id, shift_date, start_time, end_time, worker_name, client_rating
     """
     conn = db_connect()
     cur = conn.cursor()
@@ -1424,7 +1440,8 @@ def list_tasks_for_client(client_user_id: int, limit: int = 200) -> list:
             s.shift_date,
             s.start_time,
             s.end_time,
-            COALESCE(w.full_name, 'Не назначен')
+            COALESCE(w.full_name, 'Не назначен'),
+            t.client_rating
         FROM tasks t
         JOIN shifts s ON s.id = t.shift_id
         JOIN projects p ON p.id = s.project_id
@@ -1438,6 +1455,44 @@ def list_tasks_for_client(client_user_id: int, limit: int = 200) -> list:
     rows = cur.fetchall()
     conn.close()
     return rows
+
+
+def client_owns_task(client_user_id: int, task_id: int) -> bool:
+    conn = db_connect()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT 1 FROM tasks t
+        JOIN shifts s ON s.id = t.shift_id
+        JOIN projects p ON p.id = s.project_id
+        WHERE t.id = ? AND p.client_id = ?
+        """,
+        (task_id, client_user_id),
+    )
+    ok = cur.fetchone() is not None
+    conn.close()
+    return ok
+
+
+def set_task_client_rating(client_user_id: int, task_id: int, rating: int) -> bool:
+    if rating < 1 or rating > 5:
+        return False
+    if not client_owns_task(client_user_id, task_id):
+        return False
+    conn = db_connect()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        UPDATE tasks
+        SET client_rating = ?, client_rated_at = CURRENT_TIMESTAMP
+        WHERE id = ? AND status = 'completed' AND client_rating IS NULL
+        """,
+        (rating, task_id),
+    )
+    ok = cur.rowcount > 0
+    conn.commit()
+    conn.close()
+    return ok
 
 
 # ========== ЧАТ ==========

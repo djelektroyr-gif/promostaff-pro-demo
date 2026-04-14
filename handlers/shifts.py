@@ -27,6 +27,7 @@ from db import (
     resolve_extension_request,
     extend_shift_end_time,
     set_assignment_checkin_geo_failed,
+    format_date_ru,
 )
 from config import ADMIN_USER_ID
 from states import CheckinFlow, CheckoutFlow, ShiftExtensionFlow, ClientMessageWorkerFlow
@@ -86,11 +87,12 @@ async def show_my_shifts(callback: types.CallbackQuery):
         keyboard_rows = []
         for s in shifts:
             status_emoji = "🟢" if s[6] == "open" else "🔵" if s[6] == "in_progress" else "⚪"
-            text += f"{status_emoji} {s[1]} {s[2]}-{s[3]} | {s[5]}\n"
+            d_ru = format_date_ru(s[1])
+            text += f"{status_emoji} {d_ru} {s[2]}-{s[3]} | {s[5]}\n"
             keyboard_rows.append(
                 [
                     InlineKeyboardButton(
-                        text=f"{s[1]} {s[2]}-{s[3]}",
+                        text=f"{d_ru} {s[2]}-{s[3]}",
                         callback_data=f"shift_detail_{s[0]}",
                     )
                 ]
@@ -115,11 +117,12 @@ async def show_my_shifts(callback: types.CallbackQuery):
                 "checked_in": "🔵 В процессе",
                 "checked_out": "⚪ Завершена",
             }.get(s[5], s[5])
-            text += f"{status_text}: {s[1]} {s[2]}-{s[3]}\n"
+            d_ru = format_date_ru(s[1])
+            text += f"{status_text}: {d_ru} {s[2]}-{s[3]}\n"
             keyboard_rows.append(
                 [
                     InlineKeyboardButton(
-                        text=f"{s[1]} {s[2]}-{s[3]}",
+                        text=f"{d_ru} {s[2]}-{s[3]}",
                         callback_data=f"worker_shift_{s[0]}",
                     )
                 ]
@@ -151,12 +154,12 @@ async def my_projects(callback: types.CallbackQuery):
         )
         await callback.answer()
         return
-    text = "📋 *Ваши проекты:*\n\nСмены — в «Мои смены». Здесь — центр проекта (смены и общий чат).\n\n"
+    text = "📋 *Ваши проекты:*\n\nСмены — в «Мои смены». Здесь — всё по проекту: список смен и общий чат.\n\n"
     rows = []
     for p in projects:
         text += f"• #{p[0]} — {p[1]}\n"
         rows.append(
-            [InlineKeyboardButton(text=f"📌 Центр проекта #{p[0]}", callback_data=f"project_hub_{p[0]}")]
+            [InlineKeyboardButton(text=f"📌 Экран проекта #{p[0]}", callback_data=f"project_hub_{p[0]}")]
         )
     rows.append([InlineKeyboardButton(text="🔙 Назад", callback_data="main_menu")])
     keyboard = InlineKeyboardMarkup(inline_keyboard=rows)
@@ -195,7 +198,7 @@ async def client_shift_chats(callback: types.CallbackQuery):
     rows = []
     for s in shifts[:25]:
         rows.append(
-            [InlineKeyboardButton(text=f"💬 Смена #{s[0]}: {s[1]} {s[2]}-{s[3]}", callback_data=f"chat_{s[0]}")]
+            [InlineKeyboardButton(text=f"💬 Смена #{s[0]}: {format_date_ru(s[1])} {s[2]}-{s[3]}", callback_data=f"chat_{s[0]}")]
         )
     rows.append([InlineKeyboardButton(text="🔙 Назад", callback_data="main_menu")])
     await callback.message.edit_text(
@@ -223,7 +226,7 @@ async def shift_detail(callback: types.CallbackQuery):
 
     text = (
         f"📅 *Смена #{shift_id}*\n\n"
-        f"📆 Дата: {shift[2]}\n"
+        f"📆 Дата: {format_date_ru(shift[2])}\n"
         f"⏰ Время: {shift[3]} — {shift[4]}\n"
         f"📍 Локация: {shift[5]}\n"
         f"💰 Ставка: {shift[6]} ₽/час\n\n"
@@ -244,7 +247,7 @@ async def shift_detail(callback: types.CallbackQuery):
 
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="🎯 Центр смены", callback_data=f"shift_hub_cl_{shift_id}")],
+            [InlineKeyboardButton(text="🎯 Вся смена здесь", callback_data=f"shift_hub_cl_{shift_id}")],
             [InlineKeyboardButton(text="📋 Поставить задачу", callback_data=f"add_task_{shift_id}")],
             [InlineKeyboardButton(text="✉️ Написать исполнителю", callback_data=f"msg_worker_pick_{shift_id}")],
             [InlineKeyboardButton(text="💬 Чат смены", callback_data=f"chat_{shift_id}")],
@@ -274,7 +277,7 @@ async def worker_shift_detail(callback: types.CallbackQuery):
 
     text = (
         f"📅 *Смена #{shift_id}*\n\n"
-        f"📆 Дата: {shift[2]}\n"
+        f"📆 Дата: {format_date_ru(shift[2])}\n"
         f"⏰ Время: {shift[3]} — {shift[4]}\n"
         f"📍 Локация: {shift[5]}\n"
         f"💰 Ставка: {shift[6]} ₽/час\n\n"
@@ -316,7 +319,7 @@ async def worker_shift_detail(callback: types.CallbackQuery):
         [InlineKeyboardButton(text="📋 Задачи смены", callback_data=f"tasks_{shift_id}")]
     )
     keyboard_rows.append(
-        [InlineKeyboardButton(text="🎯 Центр смены", callback_data=f"shift_hub_wk_{shift_id}")]
+        [InlineKeyboardButton(text="🎯 Вся смена здесь", callback_data=f"shift_hub_wk_{shift_id}")]
     )
     keyboard_rows.append(
         [
@@ -499,10 +502,11 @@ async def checkout_geo_received(message: types.Message, state: FSMContext):
     )
     await state.set_state(CheckoutFlow.photo)
     await message.answer(
-        "📸 *ЧЕК-АУТ*\n\nОтправьте финальное фото (или текст `0` чтобы пропустить).",
+        "📸 *ЧЕК-АУТ*\n\n"
+        "Отправьте селфи на фоне объекта (как при чек-ине).\n\n"
+        "*Скрепка 📎 → Камера*",
         parse_mode="Markdown",
     )
-
 
 @router.message(F.photo, CheckoutFlow.photo)
 async def checkout_photo_received(message: types.Message, state: FSMContext):
@@ -516,14 +520,9 @@ async def checkout_photo_received(message: types.Message, state: FSMContext):
 
 @router.message(F.text, CheckoutFlow.photo)
 async def checkout_skip_photo(message: types.Message, state: FSMContext):
-    if message.text == "0":
-        data = await state.get_data()
-        shift_id = data["checkout_shift_id"]
-        do_checkout(shift_id, message.from_user.id, None)
-        await message.answer("✅ *Смена завершена!* Спасибо за работу!", parse_mode="Markdown")
-        await state.clear()
-    else:
-        await message.answer("Отправьте фото или `0` чтобы пропустить.")
+    await message.answer(
+        "Для чек-аута нужно фото (селфи). Отправьте снимок — так же, как при чек-ине."
+    )
 
 
 @router.callback_query(F.data.startswith("forgot_close_"))
@@ -709,7 +708,7 @@ async def show_shift_report(callback: types.CallbackQuery):
     shift = report["shift"]
     text = (
         f"📊 *ОТЧЁТ ПО СМЕНЕ #{shift_id}*\n\n"
-        f"📆 {shift[2]} | {shift[3]}-{shift[4]}\n📍 {shift[5]}\n💰 Ставка: {shift[6]} ₽/час\n\n👥 *ИСПОЛНИТЕЛИ:*\n"
+        f"📆 {format_date_ru(shift[2])} | {shift[3]}-{shift[4]}\n📍 {shift[5]}\n💰 Ставка: {shift[6]} ₽/час\n\n👥 *ИСПОЛНИТЕЛИ:*\n"
     )
     total_payment = 0
     for a in report["assignments"]:

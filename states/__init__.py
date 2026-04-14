@@ -39,6 +39,8 @@ class TaskCreation(StatesGroup):
     shift_id = State()
     title = State()
     description = State()
+    choose_assignment = State()
+    pick_workers = State()
     assigned_to = State()
 
 
