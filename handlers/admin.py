@@ -16,15 +16,18 @@ router = Router()
 def is_admin(user_id: int) -> bool:
     return user_id == ADMIN_USER_ID
 
+# 🔧 ИСПРАВЛЕННЫЙ ДЕКОРАТОР
 def admin_only(func):
     async def wrapper(event, *args, **kwargs):
-        user_id = event.from_user.id if hasattr(event, 'from_user') else event.message.from_user.id
+        user_id = event.from_user.id
         if not is_admin(user_id):
             if hasattr(event, 'answer'):
                 await event.answer("⛔ У вас нет прав.", show_alert=True)
             else:
                 await event.message.answer("⛔ У вас нет прав.")
             return
+        # Убираем 'dispatcher' из kwargs, если он там есть
+        kwargs.pop('dispatcher', None)
         return await func(event, *args, **kwargs)
     return wrapper
 
