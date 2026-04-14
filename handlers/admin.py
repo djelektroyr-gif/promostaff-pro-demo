@@ -1,5 +1,6 @@
 # handlers/admin.py
 import inspect
+import re
 from functools import wraps
 
 from aiogram import Router, F, types
@@ -8,7 +9,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 from config import ADMIN_USER_ID
-from states import ProjectCreation, ShiftAdminLine
+from states import ProjectCreation, ShiftCreation, ShiftAdminLine
 from db import (
     create_project,
     create_shift,
@@ -25,6 +26,7 @@ from db import (
     seed_demo_data,
     assign_worker,
     delete_worker_safe,
+    delete_project_cascade,
     list_clients,
     delete_client_cascade,
     list_projects_admin,
@@ -71,6 +73,7 @@ def _admin_main_keyboard() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="🧭 Статусы исполнителей", callback_data="admin_worker_statuses")],
             [InlineKeyboardButton(text="🏢 Заказчики", callback_data="admin_clients")],
             [InlineKeyboardButton(text="➕ Создать проект", callback_data="admin_create_project")],
+            [InlineKeyboardButton(text="🗂 Управление проектами", callback_data="admin_project_manage")],
             [InlineKeyboardButton(text="📅 Создать смену", callback_data="admin_create_shift")],
             [InlineKeyboardButton(text="🗓 Управление сменами", callback_data="admin_shift_manage")],
             [InlineKeyboardButton(text="👥 Назначить на смену", callback_data="admin_assign")],
@@ -464,6 +467,77 @@ async def admin_create_project_finish(message: types.Message, state: FSMContext)
     await admin_panel(message)
 
 
+@router.callback_query(F.data == "admin_project_manage")
+@admin_only
+async def admin_project_manage(callback: types.CallbackQuery):
+    projects = list_projects_admin(50)
+    if not projects:
+        await callback.message.edit_text(
+            "📁 Проектов пока нет.",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back")]]
+            ),
+        )
+        await callback.answer()
+        return
+    rows = []
+    text = "🗂 *Управление проектами*\n\n"
+    for p in projects:
+        pid, name, client_id, company_name, contact_name = p
+        text += f"• #{pid} — {name} | клиент: {company_name or contact_name or client_id}\n"
+        rows.append([InlineKeyboardButton(text=f"🗑 Удалить проект #{pid}", callback_data=f"admin_project_delask_{pid}")])
+    rows.append([InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back")])
+    await callback.message.edit_text(
+        text,
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("admin_project_delask_"))
+@admin_only
+async def admin_project_delete_confirm(callback: types.CallbackQuery):
+    raw = callback.data.replace("admin_project_delask_", "")
+    if not raw.isdigit():
+        await callback.answer()
+        return
+    pid = int(raw)
+    await callback.message.edit_text(
+        f"⚠️ Удалить проект #{pid} и каскадно удалить все его смены/назначения/задачи/чат?",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="✅ Да, удалить проект", callback_data=f"admin_project_deldo_{pid}")],
+                [InlineKeyboardButton(text="❌ Отмена", callback_data="admin_project_manage")],
+            ]
+        ),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("admin_project_deldo_"))
+@admin_only
+async def admin_project_delete_do(callback: types.CallbackQuery):
+    raw = callback.data.replace("admin_project_deldo_", "")
+    if not raw.isdigit():
+        await callback.answer()
+        return
+    pid = int(raw)
+    result = delete_project_cascade(pid)
+    if result["deleted"]:
+        log_admin_action(
+            callback.from_user.id,
+            "delete_project_cascade",
+            "project",
+            pid,
+            f"shifts={result['shifts']};assignments={result['assignments']};tasks={result['tasks']};chat={result['chat_messages']}",
+        )
+        await callback.answer("Проект удалён", show_alert=False)
+    else:
+        await callback.answer("Проект не найден", show_alert=True)
+    await admin_project_manage(callback)
+
+
 @router.callback_query(F.data == "admin_create_shift")
 @admin_only
 async def admin_create_shift_list_projects(callback: types.CallbackQuery):
@@ -497,26 +571,164 @@ async def admin_create_shift_list_projects(callback: types.CallbackQuery):
 @admin_only
 async def admin_create_shift_form(callback: types.CallbackQuery, state: FSMContext):
     project_id = int(callback.data.replace("shift_project_", ""))
+    await state.clear()
     await state.update_data(shift_project_id=project_id)
-    await state.set_state(ShiftAdminLine.line)
+    await state.set_state(ShiftCreation.date)
     await callback.message.edit_text(
-        "📅 Введите данные смены *одной строкой*:\n"
-        "`ДД.ММ.ГГГГ | ЧЧ:ММ | ЧЧ:ММ | Адрес | Ставка_₽_час`\n\n"
-        "*Пример:* `15.05.2026 | 10:00 | 18:00 | ТЦ Европейский | 500`",
+        "📅 *Создание смены (шаг 1/5)*\n\n"
+        "Введите дату в формате `ДД.ММ.ГГГГ`.\n"
+        "Пример: `15.05.2026`",
         parse_mode="Markdown",
     )
     await callback.answer()
 
 
-@router.message(ShiftAdminLine.line)
+def _is_hhmm(value: str) -> bool:
+    return bool(re.match(r"^(?:[01]\d|2[0-3]):[0-5]\d$", value))
+
+
+def _parse_coords(value: str) -> tuple[float, float] | None:
+    raw = (value or "").strip().replace(" ", "")
+    if raw in ("0", "-", "skip"):
+        return None
+    if "," not in raw:
+        raise ValueError("Формат: широта,долгота")
+    lat_raw, lng_raw = raw.split(",", 1)
+    lat = float(lat_raw)
+    lng = float(lng_raw)
+    if not (-90 <= lat <= 90 and -180 <= lng <= 180):
+        raise ValueError("Координаты вне диапазона")
+    return lat, lng
+
+
+@router.message(ShiftCreation.date)
+@admin_only
+async def admin_create_shift_date(message: types.Message, state: FSMContext):
+    raw = (message.text or "").strip()
+    try:
+        # Валидация даты через общий парсер db.py
+        from db import normalize_shift_date
+
+        normalize_shift_date(raw)
+    except Exception:
+        await message.answer("❌ Неверная дата. Используйте формат `ДД.ММ.ГГГГ`, например `15.05.2026`.", parse_mode="Markdown")
+        return
+    await state.update_data(shift_date=raw)
+    await state.set_state(ShiftCreation.start_time)
+    await message.answer(
+        "⏰ *Шаг 2/5*\nВведите время начала в формате `ЧЧ:ММ`.\nПример: `10:00`",
+        parse_mode="Markdown",
+    )
+
+
+@router.message(ShiftCreation.start_time)
+@admin_only
+async def admin_create_shift_start_time(message: types.Message, state: FSMContext):
+    start_time = (message.text or "").strip()
+    if not _is_hhmm(start_time):
+        await message.answer("❌ Неверный формат времени. Пример: `10:00`", parse_mode="Markdown")
+        return
+    await state.update_data(start_time=start_time)
+    await state.set_state(ShiftCreation.end_time)
+    await message.answer(
+        "⏱ *Шаг 3/7*\nВведите время окончания в формате `ЧЧ:ММ`.\nПример: `18:00`",
+        parse_mode="Markdown",
+    )
+
+
+@router.message(ShiftCreation.end_time)
+@admin_only
+async def admin_create_shift_end_time(message: types.Message, state: FSMContext):
+    end_time = (message.text or "").strip()
+    if not _is_hhmm(end_time):
+        await message.answer("❌ Неверный формат времени. Пример: `18:00`", parse_mode="Markdown")
+        return
+    data = await state.get_data()
+    start_time = (data.get("start_time") or "").strip()
+    if start_time == end_time:
+        await message.answer("❌ Время окончания не должно совпадать со временем начала.")
+        return
+    await state.update_data(end_time=end_time)
+    await state.set_state(ShiftCreation.location)
+    await message.answer("📍 *Шаг 4/7*\nВведите адрес/локацию смены.")
+
+
+@router.message(ShiftCreation.location)
+@admin_only
+async def admin_create_shift_location(message: types.Message, state: FSMContext):
+    location = (message.text or "").strip()
+    if len(location) < 5:
+        await message.answer("❌ Слишком короткий адрес. Введите локацию подробнее.")
+        return
+    await state.update_data(location=location)
+    await state.set_state(ShiftCreation.coords)
+    await message.answer(
+        "🧭 *Шаг 5/7*\n"
+        "Введите координаты площадки в формате `55.7522,37.6156`.\n"
+        "Если контроль гео не нужен, отправьте `0`.",
+        parse_mode="Markdown",
+    )
+
+
+@router.message(ShiftCreation.coords)
+@admin_only
+async def admin_create_shift_coords(message: types.Message, state: FSMContext):
+    raw = (message.text or "").strip()
+    try:
+        coords = _parse_coords(raw)
+    except Exception:
+        await message.answer(
+            "❌ Неверный формат координат. Пример: `55.7522,37.6156` или `0` чтобы пропустить.",
+            parse_mode="Markdown",
+        )
+        return
+    if coords is None:
+        await state.update_data(expected_lat=None, expected_lng=None, checkin_radius_m=None)
+        await state.set_state(ShiftCreation.rate)
+        await message.answer(
+            "💰 *Шаг 7/7*\nВведите ставку в рублях за час (только число).\nПример: `500`",
+            parse_mode="Markdown",
+        )
+        return
+    await state.update_data(expected_lat=coords[0], expected_lng=coords[1])
+    await state.set_state(ShiftCreation.radius)
+    await message.answer(
+        "📐 *Шаг 6/7*\nВведите радиус допуска в метрах (например `300`).",
+        parse_mode="Markdown",
+    )
+
+
+@router.message(ShiftCreation.radius)
+@admin_only
+async def admin_create_shift_radius(message: types.Message, state: FSMContext):
+    raw = (message.text or "").strip()
+    if not raw.isdigit():
+        await message.answer("❌ Радиус должен быть числом, например `300`.", parse_mode="Markdown")
+        return
+    radius = int(raw)
+    if radius < 30 or radius > 3000:
+        await message.answer("❌ Радиус должен быть в диапазоне 30..3000 метров.")
+        return
+    await state.update_data(checkin_radius_m=radius)
+    await state.set_state(ShiftCreation.rate)
+    await message.answer(
+        "💰 *Шаг 7/7*\nВведите ставку в рублях за час (только число).\nПример: `500`",
+        parse_mode="Markdown",
+    )
+
+
+@router.message(ShiftCreation.rate)
 @admin_only
 async def admin_create_shift_finish(message: types.Message, state: FSMContext):
+    rate_raw = (message.text or "").strip()
+    if not rate_raw.isdigit():
+        await message.answer("❌ Ставка должна быть числом, например `500`.", parse_mode="Markdown")
+        return
+    rate = int(rate_raw)
+    if rate <= 0 or rate > 10000:
+        await message.answer("❌ Ставка должна быть в диапазоне 1..10000.")
+        return
     try:
-        parts = [p.strip() for p in message.text.split("|")]
-        if len(parts) < 4:
-            raise ValueError("Нужно минимум 4 поля через |")
-        date_str, start_time, end_time, location = parts[:4]
-        rate = int(parts[4]) if len(parts) > 4 else 500
         data = await state.get_data()
         project_id = data.get("shift_project_id")
         if not project_id:
@@ -526,15 +738,33 @@ async def admin_create_shift_finish(message: types.Message, state: FSMContext):
         shift_id = create_shift(
             int(project_id),
             {
-                "date": date_str,
-                "start_time": start_time,
-                "end_time": end_time,
-                "location": location,
+                "date": data.get("shift_date"),
+                "start_time": data.get("start_time"),
+                "end_time": data.get("end_time"),
+                "location": data.get("location"),
                 "rate": rate,
+                "expected_lat": data.get("expected_lat"),
+                "expected_lng": data.get("expected_lng"),
+                "checkin_radius_m": data.get("checkin_radius_m") or 300,
             },
         )
         log_admin_action(message.from_user.id, "create_shift", "shift", shift_id, f"project_id={project_id}")
-        await message.answer(f"✅ Смена создана! ID: `{shift_id}`", parse_mode="Markdown")
+        coords_line = "без контроля гео"
+        if data.get("expected_lat") is not None and data.get("expected_lng") is not None:
+            coords_line = (
+                f"`{data.get('expected_lat')},{data.get('expected_lng')}`\n"
+                f"Радиус: `{data.get('checkin_radius_m') or 300} м`"
+            )
+        await message.answer(
+            "✅ Смена создана!\n\n"
+            f"ID: `{shift_id}`\n"
+            f"Дата: `{data.get('shift_date')}`\n"
+            f"Время: `{data.get('start_time')} - {data.get('end_time')}`\n"
+            f"Локация: {data.get('location')}\n"
+            f"Координаты/геоконтроль: {coords_line}\n"
+            f"Ставка: `{rate}` ₽/час",
+            parse_mode="Markdown",
+        )
     except Exception as e:
         await message.answer(f"❌ Ошибка: {e}")
     await state.clear()

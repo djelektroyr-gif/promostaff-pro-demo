@@ -1,4 +1,6 @@
 # handlers/shifts.py
+import math
+
 from aiogram import Router, F, types
 from aiogram.fsm.context import FSMContext
 from aiogram.filters import StateFilter
@@ -26,6 +28,26 @@ router = Router()
 # Индексы строки assignments + JOIN workers: a[0..10] + full_name a[11], phone a[12]
 A_STATUS = 3
 A_FULL_NAME = 11
+
+
+def _distance_m(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
+    """Haversine distance in meters."""
+    r = 6371000.0
+    p1 = math.radians(lat1)
+    p2 = math.radians(lat2)
+    dp = math.radians(lat2 - lat1)
+    dl = math.radians(lng2 - lng1)
+    a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    return 2 * r * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+
+def _shift_geo_limits(shift: tuple | None) -> tuple[float | None, float | None, int]:
+    if not shift or len(shift) < 12:
+        return None, None, 300
+    lat = shift[9]
+    lng = shift[10]
+    radius = int(shift[11] or 300)
+    return lat, lng, radius
 
 
 @router.callback_query(F.data == "my_shifts")
@@ -266,6 +288,24 @@ async def checkin_start(callback: types.CallbackQuery, state: FSMContext):
 
 @router.message(F.location, CheckinFlow.geo)
 async def checkin_geo_received(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    shift_id = data.get("checkin_shift_id")
+    shift = get_shift(int(shift_id)) if shift_id else None
+    exp_lat, exp_lng, radius = _shift_geo_limits(shift)
+    if exp_lat is not None and exp_lng is not None:
+        dist = _distance_m(
+            float(message.location.latitude),
+            float(message.location.longitude),
+            float(exp_lat),
+            float(exp_lng),
+        )
+        if dist > radius:
+            await message.answer(
+                "❌ Вы слишком далеко от площадки для чек-ина.\n"
+                f"Расстояние: {int(dist)} м, допустимый радиус: {radius} м.\n"
+                "Подойдите к площадке и отправьте геолокацию снова."
+            )
+            return
     await state.update_data(
         checkin_lat=message.location.latitude,
         checkin_lng=message.location.longitude,
@@ -301,6 +341,24 @@ async def checkout_start(callback: types.CallbackQuery, state: FSMContext):
 
 @router.message(F.location, CheckoutFlow.geo)
 async def checkout_geo_received(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    shift_id = data.get("checkout_shift_id")
+    shift = get_shift(int(shift_id)) if shift_id else None
+    exp_lat, exp_lng, radius = _shift_geo_limits(shift)
+    if exp_lat is not None and exp_lng is not None:
+        dist = _distance_m(
+            float(message.location.latitude),
+            float(message.location.longitude),
+            float(exp_lat),
+            float(exp_lng),
+        )
+        if dist > radius:
+            await message.answer(
+                "❌ Вы слишком далеко от площадки для чек-аута.\n"
+                f"Расстояние: {int(dist)} м, допустимый радиус: {radius} м.\n"
+                "Подойдите к площадке и отправьте геолокацию снова."
+            )
+            return
     await state.update_data(
         checkout_lat=message.location.latitude,
         checkout_lng=message.location.longitude,

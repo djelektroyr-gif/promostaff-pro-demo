@@ -64,6 +64,9 @@ def init_db():
             location TEXT,
             rate INTEGER DEFAULT 500,
             status TEXT DEFAULT 'open',
+            expected_lat REAL,
+            expected_lng REAL,
+            checkin_radius_m INTEGER DEFAULT 300,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """
@@ -136,6 +139,16 @@ def init_db():
     if "status" not in worker_cols:
         cur.execute("ALTER TABLE workers ADD COLUMN status TEXT DEFAULT 'new'")
     cur.execute("UPDATE workers SET status = 'new' WHERE status IS NULL OR TRIM(status) = ''")
+
+    # Миграция: координаты площадки для проверки чек-ина.
+    cur.execute("PRAGMA table_info(shifts)")
+    shift_cols = {r[1] for r in cur.fetchall()}
+    if "expected_lat" not in shift_cols:
+        cur.execute("ALTER TABLE shifts ADD COLUMN expected_lat REAL")
+    if "expected_lng" not in shift_cols:
+        cur.execute("ALTER TABLE shifts ADD COLUMN expected_lng REAL")
+    if "checkin_radius_m" not in shift_cols:
+        cur.execute("ALTER TABLE shifts ADD COLUMN checkin_radius_m INTEGER DEFAULT 300")
 
     conn.commit()
     conn.close()
@@ -384,6 +397,43 @@ def create_project(name: str, client_id: int) -> int:
     return int(project_id)
 
 
+def delete_project_cascade(project_id: int) -> dict:
+    """Удалить проект и все связанные смены/назначения/задачи/чат."""
+    conn = db_connect()
+    cur = conn.cursor()
+    cur.execute("SELECT 1 FROM projects WHERE id = ?", (project_id,))
+    if not cur.fetchone():
+        conn.close()
+        return {"deleted": False, "shifts": 0, "assignments": 0, "tasks": 0, "chat_messages": 0}
+    cur.execute("SELECT id FROM shifts WHERE project_id = ?", (project_id,))
+    shift_ids = [int(r[0]) for r in cur.fetchall()]
+    shifts_count = len(shift_ids)
+    assignments_count = 0
+    tasks_count = 0
+    chat_count = 0
+    for sid in shift_ids:
+        cur.execute("SELECT COUNT(*) FROM assignments WHERE shift_id = ?", (sid,))
+        assignments_count += int(cur.fetchone()[0] or 0)
+        cur.execute("SELECT COUNT(*) FROM tasks WHERE shift_id = ?", (sid,))
+        tasks_count += int(cur.fetchone()[0] or 0)
+        cur.execute("SELECT COUNT(*) FROM chat_messages WHERE shift_id = ?", (sid,))
+        chat_count += int(cur.fetchone()[0] or 0)
+        cur.execute("DELETE FROM assignments WHERE shift_id = ?", (sid,))
+        cur.execute("DELETE FROM tasks WHERE shift_id = ?", (sid,))
+        cur.execute("DELETE FROM chat_messages WHERE shift_id = ?", (sid,))
+    cur.execute("DELETE FROM shifts WHERE project_id = ?", (project_id,))
+    cur.execute("DELETE FROM projects WHERE id = ?", (project_id,))
+    conn.commit()
+    conn.close()
+    return {
+        "deleted": True,
+        "shifts": shifts_count,
+        "assignments": assignments_count,
+        "tasks": tasks_count,
+        "chat_messages": chat_count,
+    }
+
+
 def list_projects_for_client(client_id: int) -> list:
     conn = db_connect()
     cur = conn.cursor()
@@ -420,8 +470,11 @@ def create_shift(project_id: int, data: dict) -> int:
     cur = conn.cursor()
     cur.execute(
         """
-        INSERT INTO shifts (project_id, shift_date, start_time, end_time, location, rate)
-        VALUES (?, ?, ?, ?, ?, ?)
+        INSERT INTO shifts (
+            project_id, shift_date, start_time, end_time, location, rate,
+            expected_lat, expected_lng, checkin_radius_m
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     """,
         (
             project_id,
@@ -430,6 +483,9 @@ def create_shift(project_id: int, data: dict) -> int:
             data["end_time"],
             data["location"],
             data.get("rate", 500),
+            data.get("expected_lat"),
+            data.get("expected_lng"),
+            data.get("checkin_radius_m", 300),
         ),
     )
     shift_id = cur.lastrowid

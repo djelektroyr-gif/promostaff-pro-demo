@@ -30,6 +30,8 @@ class ShiftCreation(StatesGroup):
     start_time = State()
     end_time = State()
     location = State()
+    coords = State()
+    radius = State()
     rate = State()
 
 
