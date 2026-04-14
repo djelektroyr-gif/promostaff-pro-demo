@@ -53,6 +53,10 @@ class ChatMessageState(StatesGroup):
     waiting_for_message = State()
 
 
+class ProjectChatState(StatesGroup):
+    waiting_for_message = State()
+
+
 class CheckinFlow(StatesGroup):
     geo = State()
     photo = State()

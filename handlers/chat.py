@@ -3,6 +3,7 @@ from aiogram import Router, F, types
 from aiogram.fsm.context import FSMContext
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
+from config import ADMIN_USER_ID
 from db import (
     save_chat_message,
     get_chat_messages,
@@ -11,8 +12,13 @@ from db import (
     get_client,
     get_assignment,
     client_owns_shift,
+    get_project,
+    save_project_chat_message,
+    get_project_chat_messages,
+    client_owns_project,
+    worker_assigned_to_project,
 )
-from states import ChatMessageState
+from states import ChatMessageState, ProjectChatState
 
 router = Router()
 
@@ -20,10 +26,15 @@ router = Router()
 def get_user_display_name(user_id: int) -> str:
     worker = get_worker(user_id)
     if worker:
-        return f"Исполнитель ({worker[3]})"
+        full_name = (worker[1] or "").strip() or f"id {user_id}"
+        profession = (worker[3] or "").strip()
+        return f"👷 {full_name}" + (f" ({profession})" if profession else "")
     client = get_client(user_id)
     if client:
-        return "Заказчик"
+        contact = (client[2] or "").strip()
+        company = (client[1] or "").strip()
+        label = contact or company or f"id {user_id}"
+        return f"🏢 {label}"
     return "Участник"
 
 
@@ -33,6 +44,91 @@ def _can_access_shift_chat(user_id: int, shift_id: int) -> bool:
     if get_worker(user_id) and get_assignment(shift_id, user_id):
         return True
     return False
+
+
+def _can_access_project_chat(user_id: int, project_id: int) -> bool:
+    if int(user_id) == int(ADMIN_USER_ID):
+        return True
+    if get_client(user_id) and client_owns_project(user_id, project_id):
+        return True
+    if get_worker(user_id) and worker_assigned_to_project(user_id, project_id):
+        return True
+    return False
+
+
+@router.callback_query(F.data.startswith("proj_chat_"))
+async def open_project_chat(callback: types.CallbackQuery, state: FSMContext):
+    raw = (callback.data or "").replace("proj_chat_", "")
+    if not raw.isdigit():
+        await callback.answer()
+        return
+    project_id = int(raw)
+    user_id = callback.from_user.id
+    if not _can_access_project_chat(user_id, project_id):
+        await callback.answer("Нет доступа к чату проекта.", show_alert=True)
+        return
+    pr = get_project(project_id)
+    if not pr:
+        await callback.answer("Проект не найден.", show_alert=True)
+        return
+    await state.update_data(project_chat_id=project_id)
+    messages = get_project_chat_messages(project_id, limit=15)
+    sep = "━" * 16
+    text = (
+        f"💬 *ЧАТ ПРОЕКТА #{project_id}*\n\n"
+        f"{pr[1]}\n\n{sep}\n"
+    )
+    if messages:
+        for msg in reversed(messages):
+            text += f"*{msg[0]}*: {msg[1]}\n"
+    else:
+        text += "_Сообщений пока нет._\n"
+    text += sep
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="✏️ Написать", callback_data=f"send_proj_chat_{project_id}")],
+            [InlineKeyboardButton(text="🔄 Обновить", callback_data=f"proj_chat_{project_id}")],
+            [InlineKeyboardButton(text="🔙 К проекту", callback_data=f"project_hub_{project_id}")],
+        ]
+    )
+    await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="Markdown")
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("send_proj_chat_"))
+async def prompt_project_chat_message(callback: types.CallbackQuery, state: FSMContext):
+    raw = (callback.data or "").replace("send_proj_chat_", "")
+    if not raw.isdigit():
+        await callback.answer()
+        return
+    project_id = int(raw)
+    user_id = callback.from_user.id
+    if not _can_access_project_chat(user_id, project_id):
+        await callback.answer("Нет доступа.", show_alert=True)
+        return
+    await state.update_data(project_chat_id=project_id)
+    await state.set_state(ProjectChatState.waiting_for_message)
+    await callback.message.answer("✏️ Введите сообщение для чата проекта:")
+    await callback.answer()
+
+
+@router.message(ProjectChatState.waiting_for_message)
+async def send_project_chat_message(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    project_id = data.get("project_chat_id")
+    user_id = message.from_user.id
+    if project_id is None or not _can_access_project_chat(user_id, int(project_id)):
+        await message.answer("❌ Нет доступа или сессия сброшена.")
+        await state.clear()
+        return
+    body = (message.text or "").strip()
+    if not body:
+        await message.answer("❌ Пустое сообщение нельзя отправить.")
+        return
+    display_name = get_user_display_name(user_id)
+    save_project_chat_message(int(project_id), user_id, display_name, body)
+    await message.answer("✅ Сообщение отправлено в чат проекта.")
+    await state.clear()
 
 
 @router.callback_query(F.data.startswith("chat_"))
@@ -51,17 +147,17 @@ async def open_chat(callback: types.CallbackQuery, state: FSMContext):
 
     await state.update_data(current_chat_shift=shift_id)
     messages = get_chat_messages(shift_id, limit=15)
-
+    sep = "━" * 16
     text = (
         f"💬 *ЧАТ СМЕНЫ #{shift_id}*\n\n"
-        f"📆 {shift[2]} | {shift[3]}-{shift[4]}\n📍 {shift[5]}\n\n━━━━━━━━━━━━━━━━\n"
+        f"📆 {shift[2]} | {shift[3]}-{shift[4]}\n📍 {shift[5]}\n\n{sep}\n"
     )
     if messages:
         for msg in reversed(messages):
             text += f"*{msg[0]}*: {msg[1]}\n"
     else:
         text += "_Сообщений пока нет._\n"
-    text += "━━━━━━━━━━━━━━━━"
+    text += sep
 
     is_client = get_client(user_id) is not None
     back_callback = f"shift_detail_{shift_id}" if is_client else f"worker_shift_{shift_id}"
@@ -70,6 +166,13 @@ async def open_chat(callback: types.CallbackQuery, state: FSMContext):
         inline_keyboard=[
             [InlineKeyboardButton(text="✏️ Написать", callback_data=f"send_chat_msg_{shift_id}")],
             [InlineKeyboardButton(text="🔄 Обновить", callback_data=f"chat_{shift_id}")],
+            [
+                InlineKeyboardButton(text="📅 Мои смены", callback_data="my_shifts"),
+                InlineKeyboardButton(
+                    text="✅ Мои задачи",
+                    callback_data="my_client_tasks" if is_client else "my_tasks",
+                ),
+            ],
             [InlineKeyboardButton(text="🔙 Назад", callback_data=back_callback)],
         ]
     )

@@ -15,9 +15,16 @@ from db import (
 logger = logging.getLogger(__name__)
 
 
+def _normalize_time_str(value: str) -> str:
+    s = (value or "").strip()
+    if len(s) >= 8 and s.count(":") >= 2:
+        return s[:5]
+    return s
+
+
 def _shift_start_end(shift_date: str, start_time: str, end_time: str) -> tuple[datetime, datetime]:
-    start = datetime.strptime(f"{shift_date} {start_time}", "%Y-%m-%d %H:%M")
-    end = datetime.strptime(f"{shift_date} {end_time}", "%Y-%m-%d %H:%M")
+    start = datetime.strptime(f"{shift_date} {_normalize_time_str(start_time)}", "%Y-%m-%d %H:%M")
+    end = datetime.strptime(f"{shift_date} {_normalize_time_str(end_time)}", "%Y-%m-%d %H:%M")
     if end <= start:
         end += timedelta(days=1)
     return start, end

@@ -26,15 +26,21 @@ from db import (
     set_extension_request,
     resolve_extension_request,
     extend_shift_end_time,
+    set_assignment_checkin_geo_failed,
 )
 from config import ADMIN_USER_ID
 from states import CheckinFlow, CheckoutFlow, ShiftExtensionFlow, ClientMessageWorkerFlow
 
 router = Router()
 
-# Индексы строки assignments + JOIN workers: a[0..10] + full_name a[11], phone a[12]
+# Статус в JOIN-строке assignments + workers всегда a[3]; ФИО — предпоследнее поле (a[-2]).
 A_STATUS = 3
-A_FULL_NAME = 11
+
+
+def _assign_worker_name(row: tuple) -> str:
+    if len(row) >= 2 and row[-2]:
+        return str(row[-2])
+    return str(row[2]) if len(row) > 2 else "—"
 
 
 def _distance_m(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
@@ -58,7 +64,9 @@ def _shift_geo_limits(shift: tuple | None) -> tuple[float | None, float | None, 
 
 
 def _shift_start(shift: tuple) -> datetime:
-    return datetime.strptime(f"{shift[2]} {shift[3]}", "%Y-%m-%d %H:%M")
+    raw = str(shift[3] or "").strip()
+    hhmm = raw[:5] if len(raw) >= 5 else raw
+    return datetime.strptime(f"{shift[2]} {hhmm}", "%Y-%m-%d %H:%M")
 
 
 @router.callback_query(F.data == "my_shifts")
@@ -120,6 +128,10 @@ async def show_my_shifts(callback: types.CallbackQuery):
         keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
         await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="Markdown")
 
+    else:
+        await callback.message.edit_text(
+            "Не удалось определить роль. Нажмите /start и завершите регистрацию."
+        )
     await callback.answer()
 
 
@@ -139,12 +151,15 @@ async def my_projects(callback: types.CallbackQuery):
         )
         await callback.answer()
         return
-    text = "📋 *Ваши проекты:*\n\nСмены смотрите в «Мои смены».\n\n"
+    text = "📋 *Ваши проекты:*\n\nСмены — в «Мои смены». Здесь — центр проекта (смены и общий чат).\n\n"
+    rows = []
     for p in projects:
         text += f"• #{p[0]} — {p[1]}\n"
-    keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text="🔙 Назад", callback_data="main_menu")]]
-    )
+        rows.append(
+            [InlineKeyboardButton(text=f"📌 Центр проекта #{p[0]}", callback_data=f"project_hub_{p[0]}")]
+        )
+    rows.append([InlineKeyboardButton(text="🔙 Назад", callback_data="main_menu")])
+    keyboard = InlineKeyboardMarkup(inline_keyboard=rows)
     await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="Markdown")
     await callback.answer()
 
@@ -157,6 +172,35 @@ async def create_project_client_stub(callback: types.CallbackQuery):
             inline_keyboard=[[InlineKeyboardButton(text="🔙 Назад", callback_data="main_menu")]]
         ),
         parse_mode="Markdown",
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "client_shift_chats")
+async def client_shift_chats(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    if not get_client(user_id):
+        await callback.answer("Только для заказчика.", show_alert=True)
+        return
+    shifts = list_shifts_for_client(user_id)
+    if not shifts:
+        await callback.message.edit_text(
+            "💬 У вас пока нет смен для чатов.",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text="🔙 Назад", callback_data="main_menu")]]
+            ),
+        )
+        await callback.answer()
+        return
+    rows = []
+    for s in shifts[:25]:
+        rows.append(
+            [InlineKeyboardButton(text=f"💬 Смена #{s[0]}: {s[1]} {s[2]}-{s[3]}", callback_data=f"chat_{s[0]}")]
+        )
+    rows.append([InlineKeyboardButton(text="🔙 Назад", callback_data="main_menu")])
+    await callback.message.edit_text(
+        "💬 Выберите чат смены:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
     )
     await callback.answer()
 
@@ -193,15 +237,22 @@ async def shift_detail(callback: types.CallbackQuery):
             "checked_in": "🔵 На смене",
             "checked_out": "⚪ Завершил",
         }.get(a[A_STATUS], a[A_STATUS])
-        name = a[A_FULL_NAME] if len(a) > A_FULL_NAME else "—"
-        text += f"• {name}: {status_text}\n"
+        name = _assign_worker_name(a)
+        checkin = str(a[5] or "—")
+        checkout = str(a[7] or "—")
+        text += f"• {name}: {status_text}\n  чек-ин: {checkin}\n  чек-аут: {checkout}\n"
 
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
+            [InlineKeyboardButton(text="🎯 Центр смены", callback_data=f"shift_hub_cl_{shift_id}")],
             [InlineKeyboardButton(text="📋 Поставить задачу", callback_data=f"add_task_{shift_id}")],
             [InlineKeyboardButton(text="✉️ Написать исполнителю", callback_data=f"msg_worker_pick_{shift_id}")],
             [InlineKeyboardButton(text="💬 Чат смены", callback_data=f"chat_{shift_id}")],
             [InlineKeyboardButton(text="📊 Отчёт", callback_data=f"report_{shift_id}")],
+            [
+                InlineKeyboardButton(text="📋 Проекты", callback_data="my_projects"),
+                InlineKeyboardButton(text="✅ Мои задачи", callback_data="my_client_tasks"),
+            ],
             [InlineKeyboardButton(text="🔙 Назад", callback_data="my_shifts")],
         ]
     )
@@ -264,6 +315,15 @@ async def worker_shift_detail(callback: types.CallbackQuery):
     keyboard_rows.append(
         [InlineKeyboardButton(text="📋 Задачи смены", callback_data=f"tasks_{shift_id}")]
     )
+    keyboard_rows.append(
+        [InlineKeyboardButton(text="🎯 Центр смены", callback_data=f"shift_hub_wk_{shift_id}")]
+    )
+    keyboard_rows.append(
+        [
+            InlineKeyboardButton(text="📅 Мои смены", callback_data="my_shifts"),
+            InlineKeyboardButton(text="📋 Мои задачи", callback_data="my_tasks"),
+        ]
+    )
     keyboard_rows.append([InlineKeyboardButton(text="🔙 Назад", callback_data="my_shifts")])
     keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
     await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="Markdown")
@@ -279,6 +339,9 @@ async def confirm_shift(callback: types.CallbackQuery):
     txt = f"✅ Исполнитель {callback.from_user.full_name} подтвердил выход на смену #{shift_id}."
     try:
         await callback.bot.send_message(int(ADMIN_USER_ID), txt)
+    except Exception:
+        pass
+    try:
         if shift_owner and shift_owner[7]:
             await callback.bot.send_message(int(shift_owner[7]), txt)
     except Exception:
@@ -311,6 +374,18 @@ async def checkin_geo_received(message: types.Message, state: FSMContext):
     data = await state.get_data()
     shift_id = data.get("checkin_shift_id")
     shift = get_shift(int(shift_id)) if shift_id else None
+    assignment = get_assignment(int(shift_id), message.from_user.id) if shift_id else None
+    if not shift or not assignment or assignment[3] != "confirmed":
+        await message.answer("❌ Для чек-ина смена должна быть подтверждена.")
+        await state.clear()
+        return
+    dt_start = _shift_start(shift)
+    now = datetime.now()
+    if now < dt_start.replace(second=0, microsecond=0) and (dt_start - now).total_seconds() > 30 * 60:
+        await message.answer(
+            "⏳ Слишком рано для чек-ина. Чек-ин доступен за 30 минут до старта смены."
+        )
+        return
     exp_lat, exp_lng, radius = _shift_geo_limits(shift)
     if exp_lat is not None and exp_lng is not None:
         dist = _distance_m(
@@ -320,6 +395,7 @@ async def checkin_geo_received(message: types.Message, state: FSMContext):
             float(exp_lng),
         )
         if dist > radius:
+            set_assignment_checkin_geo_failed(int(shift_id), message.from_user.id)
             await message.answer(
                 "❌ Вы слишком далеко от площадки для чек-ина.\n"
                 f"Расстояние: {int(dist)} м, допустимый радиус: {radius} м.\n"
@@ -342,7 +418,28 @@ async def checkin_photo_received(message: types.Message, state: FSMContext):
     photo_id = message.photo[-1].file_id
     data = await state.get_data()
     shift_id = data["checkin_shift_id"]
-    do_checkin(shift_id, message.from_user.id, photo_id)
+    shift_row = get_shift(int(shift_id))
+    exp_lat, exp_lng, _ = _shift_geo_limits(shift_row)
+    lat = data.get("checkin_lat")
+    lng = data.get("checkin_lng")
+    if exp_lat is not None and exp_lng is not None:
+        do_checkin(
+            int(shift_id),
+            message.from_user.id,
+            photo_id,
+            float(lat) if lat is not None else None,
+            float(lng) if lng is not None else None,
+            1,
+        )
+    else:
+        do_checkin(
+            int(shift_id),
+            message.from_user.id,
+            photo_id,
+            float(lat) if lat is not None else None,
+            float(lng) if lng is not None else None,
+            None,
+        )
     shift_owner = get_shift_with_owner(int(shift_id))
     if shift_owner:
         dt_start = _shift_start(shift_owner)
@@ -536,7 +633,7 @@ async def client_pick_worker_to_message(callback: types.CallbackQuery):
     rows = []
     for a in assignments:
         worker_id = int(a[2])
-        worker_name = a[A_FULL_NAME] if len(a) > A_FULL_NAME else f"id {worker_id}"
+        worker_name = _assign_worker_name(a) or f"id {worker_id}"
         rows.append([InlineKeyboardButton(text=f"{worker_name}", callback_data=f"msg_worker_to_{shift_id}_{worker_id}")])
     rows.append([InlineKeyboardButton(text="🔙 Назад", callback_data=f"shift_detail_{shift_id}")])
     await callback.message.edit_text(
@@ -620,7 +717,7 @@ async def show_shift_report(callback: types.CallbackQuery):
         payment = float(a[10] or 0)
         total_payment += payment
         status = "✅" if a[A_STATUS] == "checked_out" else "⏳"
-        name = a[A_FULL_NAME] if len(a) > A_FULL_NAME else "—"
+        name = _assign_worker_name(a)
         text += f"{status} {name}: {hours:.1f} ч, {payment:.0f} ₽\n"
     text += f"\n💰 *ИТОГО:* {total_payment:.0f} ₽"
 

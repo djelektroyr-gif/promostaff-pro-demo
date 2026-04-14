@@ -116,6 +116,7 @@ _PG_ID_COLUMNS = (
     ("assignments", "worker_id"),
     ("tasks", "assigned_to"),
     ("chat_messages", "user_id"),
+    ("project_chat_messages", "user_id"),
     ("admin_logs", "admin_user_id"),
     ("admin_logs", "entity_id"),
 )
@@ -307,6 +308,12 @@ def init_db():
         cur.execute("ALTER TABLE assignments ADD COLUMN extension_requested_at TIMESTAMP")
     if "extension_resolved_at" not in assignment_cols:
         cur.execute("ALTER TABLE assignments ADD COLUMN extension_resolved_at TIMESTAMP")
+    if "checkin_lat" not in assignment_cols:
+        cur.execute("ALTER TABLE assignments ADD COLUMN checkin_lat REAL")
+    if "checkin_lng" not in assignment_cols:
+        cur.execute("ALTER TABLE assignments ADD COLUMN checkin_lng REAL")
+    if "checkin_geo_ok" not in assignment_cols:
+        cur.execute("ALTER TABLE assignments ADD COLUMN checkin_geo_ok INTEGER")
 
     cur.execute(
         """
@@ -335,6 +342,21 @@ def init_db():
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS project_chat_messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            user_name TEXT,
+            message TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_project_chat_project ON project_chat_messages(project_id, created_at DESC)"
     )
     cur.execute(
         """
@@ -704,6 +726,15 @@ def list_projects_for_client(client_id: int) -> list:
     return rows
 
 
+def get_project(project_id: int):
+    conn = db_connect()
+    cur = conn.cursor()
+    cur.execute("SELECT id, name, client_id FROM projects WHERE id = ?", (project_id,))
+    row = cur.fetchone()
+    conn.close()
+    return row
+
+
 def list_projects_admin(limit: int = 30) -> list:
     conn = db_connect()
     cur = conn.cursor()
@@ -884,6 +915,35 @@ def client_owns_shift(client_user_id: int, shift_id: int) -> bool:
     return ok
 
 
+def client_owns_project(client_user_id: int, project_id: int) -> bool:
+    conn = db_connect()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT 1 FROM projects WHERE id = ? AND client_id = ?",
+        (project_id, client_user_id),
+    )
+    ok = cur.fetchone() is not None
+    conn.close()
+    return ok
+
+
+def worker_assigned_to_project(worker_id: int, project_id: int) -> bool:
+    conn = db_connect()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT 1 FROM assignments a
+        JOIN shifts s ON s.id = a.shift_id
+        WHERE a.worker_id = ? AND s.project_id = ?
+        LIMIT 1
+        """,
+        (worker_id, project_id),
+    )
+    ok = cur.fetchone() is not None
+    conn.close()
+    return ok
+
+
 def assign_worker(shift_id: int, worker_id: int):
     conn = db_connect()
     cur = conn.cursor()
@@ -1007,15 +1067,55 @@ def get_shift_assignments(shift_id: int) -> list:
     return rows
 
 
-def do_checkin(shift_id: int, worker_id: int, photo_url: str | None = None):
+def assignment_join_worker_name(row: tuple) -> str:
+    """Имя в строке SELECT a.*, w.full_name, w.phone (full_name всегда предпоследний столбец)."""
+    if len(row) >= 2 and row[-2]:
+        return str(row[-2])
+    return str(row[2])
+
+
+def do_checkin(
+    shift_id: int,
+    worker_id: int,
+    photo_url: str | None = None,
+    checkin_lat: float | None = None,
+    checkin_lng: float | None = None,
+    checkin_geo_ok: int | None = None,
+):
+    conn = db_connect()
+    cur = conn.cursor()
+    if checkin_geo_ok is not None:
+        cur.execute(
+            """
+            UPDATE assignments SET status = 'checked_in', checkin_time = CURRENT_TIMESTAMP, checkin_photo = ?,
+                checkin_lat = ?, checkin_lng = ?, checkin_geo_ok = ?
+            WHERE shift_id = ? AND worker_id = ?
+        """,
+            (photo_url, checkin_lat, checkin_lng, checkin_geo_ok, shift_id, worker_id),
+        )
+    else:
+        cur.execute(
+            """
+            UPDATE assignments SET status = 'checked_in', checkin_time = CURRENT_TIMESTAMP, checkin_photo = ?,
+                checkin_lat = ?, checkin_lng = ?
+            WHERE shift_id = ? AND worker_id = ?
+        """,
+            (photo_url, checkin_lat, checkin_lng, shift_id, worker_id),
+        )
+    conn.commit()
+    conn.close()
+
+
+def set_assignment_checkin_geo_failed(shift_id: int, worker_id: int) -> None:
+    """Фиксируем неудачную попытку чек-ина по гео (вне радиуса)."""
     conn = db_connect()
     cur = conn.cursor()
     cur.execute(
         """
-        UPDATE assignments SET status = 'checked_in', checkin_time = CURRENT_TIMESTAMP, checkin_photo = ?
-        WHERE shift_id = ? AND worker_id = ?
-    """,
-        (photo_url, shift_id, worker_id),
+        UPDATE assignments SET checkin_geo_ok = 0
+        WHERE shift_id = ? AND worker_id = ? AND status = 'confirmed'
+        """,
+        (shift_id, worker_id),
     )
     conn.commit()
     conn.close()
@@ -1203,7 +1303,8 @@ def extend_shift_end_time(shift_id: int, minutes: int) -> bool:
         conn.close()
         return False
     try:
-        t = datetime.strptime(str(row[0]), "%H:%M")
+        raw = str(row[0] or "").strip()
+        t = datetime.strptime(raw[:5], "%H:%M")
     except Exception:
         conn.close()
         return False
@@ -1369,6 +1470,36 @@ def get_chat_messages(shift_id: int, limit: int = 20) -> list:
     return rows
 
 
+
+
+def save_project_chat_message(project_id: int, user_id: int, user_name: str, message: str):
+    conn = db_connect()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO project_chat_messages (project_id, user_id, user_name, message)
+        VALUES (?, ?, ?, ?)
+    """,
+        (project_id, user_id, user_name, message),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_project_chat_messages(project_id: int, limit: int = 25) -> list:
+    conn = db_connect()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT user_name, message, created_at FROM project_chat_messages
+        WHERE project_id = ? ORDER BY created_at DESC LIMIT ?
+    """,
+        (project_id, limit),
+    )
+    rows = cur.fetchall()
+    conn.close()
+    return rows
+
 # ========== ОТЧЁТЫ ==========
 def get_shift_report(shift_id: int) -> dict:
     conn = db_connect()
@@ -1379,7 +1510,7 @@ def get_shift_report(shift_id: int) -> dict:
 
     cur.execute(
         """
-        SELECT a.*, w.full_name FROM assignments a
+        SELECT a.*, w.full_name, w.phone FROM assignments a
         JOIN workers w ON a.worker_id = w.user_id
         WHERE a.shift_id = ?
     """,

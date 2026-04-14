@@ -15,6 +15,8 @@ from db import (
     get_task,
     get_client,
     list_tasks_for_client,
+    list_shifts_for_client,
+    assignment_join_worker_name,
 )
 from states import TaskCreation, TaskCompletion
 
@@ -26,6 +28,33 @@ T_STATUS = 5
 @router.callback_query(F.data == "my_client_tasks")
 async def client_tasks_panel(callback: types.CallbackQuery):
     await _render_client_tasks(callback, "all")
+
+
+@router.callback_query(F.data == "client_add_task_pick_shift")
+async def client_add_task_pick_shift(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    if not get_client(user_id):
+        await callback.answer("Только для заказчика.", show_alert=True)
+        return
+    shifts = list_shifts_for_client(user_id)
+    if not shifts:
+        await callback.message.edit_text(
+            "❌ У вас нет смен. Сначала создайте смену через администратора.",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text="🔙 Назад", callback_data="main_menu")]]
+            ),
+        )
+        await callback.answer()
+        return
+    rows = []
+    for s in shifts[:20]:
+        rows.append([InlineKeyboardButton(text=f"📅 #{s[0]} {s[1]} {s[2]}-{s[3]}", callback_data=f"add_task_{s[0]}")])
+    rows.append([InlineKeyboardButton(text="🔙 Назад", callback_data="main_menu")])
+    await callback.message.edit_text(
+        "📝 Выберите смену, куда добавить задачу:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+    )
+    await callback.answer()
 
 
 @router.callback_query(F.data.startswith("my_client_tasks_"))
@@ -89,6 +118,10 @@ async def _render_client_tasks(callback: types.CallbackQuery, flt: str) -> None:
                 InlineKeyboardButton(text="Открытые", callback_data="my_client_tasks_open"),
                 InlineKeyboardButton(text="Выполненные", callback_data="my_client_tasks_done"),
             ],
+            [
+                InlineKeyboardButton(text="📋 Проекты", callback_data="my_projects"),
+                InlineKeyboardButton(text="📅 Мои смены", callback_data="my_shifts"),
+            ],
             [InlineKeyboardButton(text="🔙 Назад", callback_data="main_menu")],
         ]
     )
@@ -129,6 +162,12 @@ async def my_tasks_hub(callback: types.CallbackQuery):
             ]
         )
     rows.append([InlineKeyboardButton(text="🔙 Назад", callback_data="main_menu")])
+    rows.append(
+        [
+            InlineKeyboardButton(text="📅 Мои смены", callback_data="my_shifts"),
+            InlineKeyboardButton(text="🏠 Меню", callback_data="main_menu"),
+        ]
+    )
     await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows), parse_mode="Markdown")
     await callback.answer()
 
@@ -168,7 +207,7 @@ async def task_description_received(message: types.Message, state: FSMContext):
     keyboard_rows = []
     for a in assignments:
         wid = a[2]
-        name = a[11] if len(a) > 11 else f"id{wid}"
+        name = assignment_join_worker_name(a)
         keyboard_rows.append(
             [InlineKeyboardButton(text=name[:40], callback_data=f"assign_task_{wid}")]
         )
@@ -246,6 +285,12 @@ async def show_my_tasks_for_shift(callback: types.CallbackQuery):
 
     keyboard_rows.append(
         [InlineKeyboardButton(text="🔙 Назад", callback_data=f"worker_shift_{shift_id}")]
+    )
+    keyboard_rows.append(
+        [
+            InlineKeyboardButton(text="📅 Мои смены", callback_data="my_shifts"),
+            InlineKeyboardButton(text="🏠 Меню", callback_data="main_menu"),
+        ]
     )
     keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
     await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="Markdown")

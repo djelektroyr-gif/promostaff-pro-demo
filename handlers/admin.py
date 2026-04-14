@@ -36,6 +36,12 @@ from db import (
 )
 
 router = Router()
+STATUS_RU = {
+    "new": "Новая",
+    "reviewed": "На проверке",
+    "approved": "Одобрена",
+    "rejected": "Отклонена",
+}
 
 
 def is_admin(user_id: int) -> bool:
@@ -114,7 +120,13 @@ async def admin_metrics(callback: types.CallbackQuery):
         f"📅 Открытые смены: *{m['open_shifts']}*",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(
-            inline_keyboard=[[InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back")]]
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="🗓 Смены", callback_data="admin_shift_manage"),
+                    InlineKeyboardButton(text="📝 Логи", callback_data="admin_logs"),
+                ],
+                [InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back")],
+            ]
         ),
     )
     await callback.answer()
@@ -145,10 +157,10 @@ async def admin_worker_statuses_menu(callback: types.CallbackQuery):
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text=f"Все ({counts['all']})", callback_data="admin_workers_filter_all")],
-            [InlineKeyboardButton(text=f"new ({counts['new']})", callback_data="admin_workers_filter_new")],
-            [InlineKeyboardButton(text=f"reviewed ({counts['reviewed']})", callback_data="admin_workers_filter_reviewed")],
-            [InlineKeyboardButton(text=f"approved ({counts['approved']})", callback_data="admin_workers_filter_approved")],
-            [InlineKeyboardButton(text=f"rejected ({counts['rejected']})", callback_data="admin_workers_filter_rejected")],
+            [InlineKeyboardButton(text=f"Новые ({counts['new']})", callback_data="admin_workers_filter_new")],
+            [InlineKeyboardButton(text=f"На проверке ({counts['reviewed']})", callback_data="admin_workers_filter_reviewed")],
+            [InlineKeyboardButton(text=f"Одобрены ({counts['approved']})", callback_data="admin_workers_filter_approved")],
+            [InlineKeyboardButton(text=f"Отклонены ({counts['rejected']})", callback_data="admin_workers_filter_rejected")],
             [InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back")],
         ]
     )
@@ -177,11 +189,11 @@ async def admin_workers_by_status(callback: types.CallbackQuery):
         )
         await callback.answer()
         return
-    text = f"📋 *Исполнители ({status})*\n\n"
+    text = f"📋 *Исполнители ({STATUS_RU.get(status, status)})*\n\n"
     rows = []
     for w in workers:
         uid, name, phone, profession, cur_status = w[0], w[1], w[2], w[3], w[4]
-        text += f"🆔 `{uid}` — {name} | {profession} | статус: *{cur_status}*\n"
+        text += f"🆔 `{uid}` — {name} | {profession} | статус: *{STATUS_RU.get(cur_status, cur_status)}*\n"
         rows.append([InlineKeyboardButton(text=f"⚙️ Статус {uid}", callback_data=f"admin_worker_status_{uid}")])
     rows.append([InlineKeyboardButton(text="🔙 К фильтрам", callback_data="admin_worker_statuses")])
     await callback.message.edit_text(
@@ -202,10 +214,10 @@ async def admin_worker_status_pick(callback: types.CallbackQuery):
     worker_id = int(raw)
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="new", callback_data=f"admin_worker_set_{worker_id}_new")],
-            [InlineKeyboardButton(text="reviewed", callback_data=f"admin_worker_set_{worker_id}_reviewed")],
-            [InlineKeyboardButton(text="approved", callback_data=f"admin_worker_set_{worker_id}_approved")],
-            [InlineKeyboardButton(text="rejected", callback_data=f"admin_worker_set_{worker_id}_rejected")],
+            [InlineKeyboardButton(text="Новая", callback_data=f"admin_worker_set_{worker_id}_new")],
+            [InlineKeyboardButton(text="На проверке", callback_data=f"admin_worker_set_{worker_id}_reviewed")],
+            [InlineKeyboardButton(text="Одобрена", callback_data=f"admin_worker_set_{worker_id}_approved")],
+            [InlineKeyboardButton(text="Отклонена", callback_data=f"admin_worker_set_{worker_id}_rejected")],
             [InlineKeyboardButton(text="🔙 К фильтрам", callback_data="admin_worker_statuses")],
         ]
     )
@@ -231,7 +243,7 @@ async def admin_worker_status_set(callback: types.CallbackQuery):
     if ok:
         log_admin_action(callback.from_user.id, "set_worker_status", "worker", worker_id, new_status)
         await callback.message.edit_text(
-            f"✅ Статус исполнителя `{worker_id}` обновлён: *{new_status}*",
+            f"✅ Статус исполнителя `{worker_id}` обновлён: *{STATUS_RU.get(new_status, new_status)}*",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup(
                 inline_keyboard=[[InlineKeyboardButton(text="🔙 К фильтрам", callback_data="admin_worker_statuses")]]
@@ -494,7 +506,12 @@ async def admin_project_manage(callback: types.CallbackQuery):
     for p in projects:
         pid, name, client_id, company_name, contact_name = p
         text += f"• #{pid} — {name} | клиент: {company_name or contact_name or client_id}\n"
-        rows.append([InlineKeyboardButton(text=f"🗑 Удалить проект #{pid}", callback_data=f"admin_project_delask_{pid}")])
+        rows.append(
+            [
+                InlineKeyboardButton(text=f"📌 Центр #{pid}", callback_data=f"project_hub_{pid}"),
+                InlineKeyboardButton(text=f"🗑 Удалить #{pid}", callback_data=f"admin_project_delask_{pid}"),
+            ]
+        )
     rows.append([InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back")])
     await callback.message.edit_text(
         text,
@@ -871,6 +888,7 @@ async def admin_shift_manage_list(callback: types.CallbackQuery):
     for s in shifts:
         sid, date, st, et, project_name, status = s
         text += f"• #{sid} {date} {st}-{et} | {project_name} | {status}\n"
+        rows.append([InlineKeyboardButton(text=f"🎯 Центр #{sid}", callback_data=f"shift_hub_ad_{sid}")])
         rows.append([InlineKeyboardButton(text=f"🛑 Закрыть #{sid}", callback_data=f"admin_shift_close_{sid}")])
         rows.append([InlineKeyboardButton(text=f"🗑 Удалить #{sid}", callback_data=f"admin_shift_delask_{sid}")])
     rows.append([InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back")])
