@@ -272,6 +272,16 @@ def init_db():
     if "checkin_radius_m" not in shift_cols:
         cur.execute("ALTER TABLE shifts ADD COLUMN checkin_radius_m INTEGER DEFAULT 300")
 
+    # PostgreSQL: Telegram ID могут не помещаться в INTEGER (нужен BIGINT).
+    if USE_POSTGRES:
+        cur.execute("ALTER TABLE workers ALTER COLUMN user_id TYPE BIGINT")
+        cur.execute("ALTER TABLE clients ALTER COLUMN user_id TYPE BIGINT")
+        cur.execute("ALTER TABLE projects ALTER COLUMN client_id TYPE BIGINT")
+        cur.execute("ALTER TABLE assignments ALTER COLUMN worker_id TYPE BIGINT")
+        cur.execute("ALTER TABLE tasks ALTER COLUMN assigned_to TYPE BIGINT")
+        cur.execute("ALTER TABLE chat_messages ALTER COLUMN user_id TYPE BIGINT")
+        cur.execute("ALTER TABLE admin_logs ALTER COLUMN admin_user_id TYPE BIGINT")
+
     conn.commit()
     conn.close()
     print("✅ База данных инициализирована")
