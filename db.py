@@ -1328,6 +1328,7 @@ def record_overdue_task_ping(shift_id: int, worker_id: int) -> None:
 def list_due_overdue_task_escalations(wait_minutes: int = 30) -> list:
     conn = db_connect()
     cur = conn.cursor()
+    cutoff = now_local_naive() - timedelta(minutes=int(wait_minutes))
     cur.execute(
         """
         SELECT
@@ -1336,16 +1337,16 @@ def list_due_overdue_task_escalations(wait_minutes: int = 30) -> list:
             p.worker_id,
             p.ping_sent_at,
             pr.client_id,
-            COALESCE(w.full_name, p.worker_id)
+            COALESCE(w.full_name, CAST(p.worker_id AS TEXT))
         FROM overdue_task_pings p
         JOIN shifts s ON s.id = p.shift_id
         JOIN projects pr ON pr.id = s.project_id
         LEFT JOIN workers w ON w.user_id = p.worker_id
         WHERE p.escalated_at IS NULL
-          AND p.ping_sent_at <= datetime(CURRENT_TIMESTAMP, ?)
+          AND p.ping_sent_at <= ?
         ORDER BY p.id
         """,
-        (f"-{int(wait_minutes)} minutes",),
+        (cutoff,),
     )
     rows = cur.fetchall()
     conn.close()
