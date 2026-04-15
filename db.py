@@ -1413,29 +1413,32 @@ def do_checkin(
     checkin_lat: float | None = None,
     checkin_lng: float | None = None,
     checkin_geo_ok: int | None = None,
-):
+) -> bool:
     conn = db_connect()
     cur = conn.cursor()
+    ts = now_local_naive()
     if checkin_geo_ok is not None:
         cur.execute(
             """
-            UPDATE assignments SET status = 'checked_in', checkin_time = CURRENT_TIMESTAMP, checkin_photo = ?,
+            UPDATE assignments SET status = 'checked_in', checkin_time = ?, checkin_photo = ?,
                 checkin_lat = ?, checkin_lng = ?, checkin_geo_ok = ?
             WHERE shift_id = ? AND worker_id = ?
         """,
-            (photo_url, checkin_lat, checkin_lng, checkin_geo_ok, shift_id, worker_id),
+            (ts, photo_url, checkin_lat, checkin_lng, checkin_geo_ok, shift_id, worker_id),
         )
     else:
         cur.execute(
             """
-            UPDATE assignments SET status = 'checked_in', checkin_time = CURRENT_TIMESTAMP, checkin_photo = ?,
+            UPDATE assignments SET status = 'checked_in', checkin_time = ?, checkin_photo = ?,
                 checkin_lat = ?, checkin_lng = ?
             WHERE shift_id = ? AND worker_id = ?
         """,
-            (photo_url, checkin_lat, checkin_lng, shift_id, worker_id),
+            (ts, photo_url, checkin_lat, checkin_lng, shift_id, worker_id),
         )
+    ok = cur.rowcount > 0
     conn.commit()
     conn.close()
+    return ok
 
 
 def set_assignment_checkin_geo_failed(shift_id: int, worker_id: int) -> None:
@@ -1732,7 +1735,10 @@ def mark_assignment_event(assignment_id: int, field: str) -> None:
         return
     conn = db_connect()
     cur = conn.cursor()
-    cur.execute(f"UPDATE assignments SET {field} = CURRENT_TIMESTAMP WHERE id = ?", (assignment_id,))
+    cur.execute(
+        f"UPDATE assignments SET {field} = ? WHERE id = ?",
+        (now_local_naive(), assignment_id),
+    )
     conn.commit()
     conn.close()
 
@@ -1758,8 +1764,8 @@ def mark_assignment_event_by_shift_worker(shift_id: int, worker_id: int, field: 
     conn = db_connect()
     cur = conn.cursor()
     cur.execute(
-        f"UPDATE assignments SET {field} = CURRENT_TIMESTAMP WHERE shift_id = ? AND worker_id = ?",
-        (shift_id, worker_id),
+        f"UPDATE assignments SET {field} = ? WHERE shift_id = ? AND worker_id = ?",
+        (now_local_naive(), shift_id, worker_id),
     )
     conn.commit()
     conn.close()

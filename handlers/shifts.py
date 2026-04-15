@@ -691,7 +691,12 @@ async def checkin_start(callback: types.CallbackQuery, state: FSMContext):
     await state.update_data(checkin_shift_id=shift_id)
     await state.set_state(CheckinFlow.geo)
     await callback.message.edit_text(
-        "📍 *ЧЕК-ИН*\n\nОтправьте вашу геолокацию.\n\n*Скрепка 📎 → Локация*",
+        "📍 *ЧЕК-ИН*\n\n"
+        "Сделайте по шагам:\n"
+        "1) Отправьте *локацию* (скрепка 📎 -> Локация)\n"
+        "2) Дождитесь сообщения от бота\n"
+        "3) Отправьте *селфи фото* (не как файл)\n\n"
+        "⚠️ Одним сообщением чек-ин отправить нельзя.",
         parse_mode="Markdown",
     )
     await callback.answer()
@@ -803,6 +808,15 @@ async def checkin_geo_received(message: types.Message, state: FSMContext):
     )
 
 
+@router.message(CheckinFlow.geo)
+async def checkin_geo_wrong_payload(message: types.Message):
+    await message.answer(
+        "⚠️ Для этого шага нужна именно *геолокация*.\n"
+        "Нажмите скрепку 📎 -> Локация и отправьте текущую точку.",
+        parse_mode="Markdown",
+    )
+
+
 @router.message(F.photo, CheckinFlow.photo)
 async def checkin_photo_received(message: types.Message, state: FSMContext):
     photo_id = message.photo[-1].file_id
@@ -813,7 +827,7 @@ async def checkin_photo_received(message: types.Message, state: FSMContext):
     lat = data.get("checkin_lat")
     lng = data.get("checkin_lng")
     if exp_lat is not None and exp_lng is not None:
-        do_checkin(
+        ok = do_checkin(
             int(shift_id),
             message.from_user.id,
             photo_id,
@@ -822,7 +836,7 @@ async def checkin_photo_received(message: types.Message, state: FSMContext):
             1,
         )
     else:
-        do_checkin(
+        ok = do_checkin(
             int(shift_id),
             message.from_user.id,
             photo_id,
@@ -830,6 +844,13 @@ async def checkin_photo_received(message: types.Message, state: FSMContext):
             float(lng) if lng is not None else None,
             None,
         )
+    if not ok:
+        await message.answer(
+            "❌ Чек-ин не сохранился: назначение не найдено или смена уже в другом состоянии. "
+            "Откройте смену из «Мои смены» и попробуйте снова."
+        )
+        await state.clear()
+        return
     shift_owner = get_shift_with_owner(int(shift_id))
     if shift_owner:
         dt_start = _shift_start(shift_owner)
@@ -849,6 +870,15 @@ async def checkin_photo_received(message: types.Message, state: FSMContext):
                 pass
     await message.answer("✅ *Чек-ин выполнен!* Удачной смены! 🚀", parse_mode="Markdown")
     await state.clear()
+
+
+@router.message(CheckinFlow.photo)
+async def checkin_photo_wrong_payload(message: types.Message):
+    await message.answer(
+        "⚠️ Сейчас нужно отправить *селфи фото*.\n"
+        "Отправьте изображение как фото (не как файл/document).",
+        parse_mode="Markdown",
+    )
 
 
 @router.callback_query(F.data.startswith("checkout_"))

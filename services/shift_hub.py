@@ -7,17 +7,21 @@ from services.shift_notifier import _shift_start_end
 from db import format_date_ru
 from services.time_utils import now_local_naive
 
+# Индексы в строке SELECT a.*, w.full_name, w.phone — порядок колонок как в init_db + миграции assignments.
 I_ASSIGNED_NOTIFY = 11
 I_REMINDER_12H = 12
-I_REMINDER_3H = 13
-I_ESCALATION_1H = 14
-I_CHECKIN_30M = 15
-I_CHECKOUT_30M = 16
-I_FORGOT_CO = 17
-I_EXT_REQ_AT = 21
-I_EXT_RES_AT = 22
-I_GEO_OK = 25
-JOIN_MIN_LEN = 28
+I_REMINDER_12H_REPEAT = 13
+I_REMINDER_3H = 14
+I_ESCALATION_11H = 15
+I_ESCALATION_1H = 16
+I_CHECKIN_30M = 17
+I_CHECKIN_15M = 18
+I_CHECKOUT_30M = 19
+I_FORGOT_CO = 20
+I_EXT_REQ_AT = 26
+I_EXT_RES_AT = 27
+I_GEO_OK = 30
+JOIN_MIN_LEN = 32
 
 R = "\U0001F534"
 Y = "\U0001F7E1"
@@ -184,12 +188,18 @@ def format_shift_hub(
             ev.append((a[I_ASSIGNED_NOTIFY], "\u0443\u0432\u0435\u0434\u043e\u043c\u043b\u0435\u043d\u0438\u0435 \u043e \u043d\u0430\u0437\u043d\u0430\u0447\u0435\u043d\u0438\u0438"))
         if len(a) > I_REMINDER_12H and a[I_REMINDER_12H]:
             ev.append((a[I_REMINDER_12H], "\u043d\u0430\u043f\u043e\u043c\u0438\u043d\u0430\u043d\u0438\u0435 ~12\u0447"))
+        if len(a) > I_REMINDER_12H_REPEAT and a[I_REMINDER_12H_REPEAT]:
+            ev.append((a[I_REMINDER_12H_REPEAT], "\u043f\u043e\u0432\u0442\u043e\u0440 ~12\u0447 (\u043a\u0430\u0436\u0434\u044b\u0435 15\u043c)"))
         if len(a) > I_REMINDER_3H and a[I_REMINDER_3H]:
             ev.append((a[I_REMINDER_3H], "\u043d\u0430\u043f\u043e\u043c\u0438\u043d\u0430\u043d\u0438\u0435 ~3\u0447"))
+        if len(a) > I_ESCALATION_11H and a[I_ESCALATION_11H]:
+            ev.append((a[I_ESCALATION_11H], "\u044d\u0441\u043a\u0430\u043b\u0430\u0446\u0438\u044f 11\u0447 (\u043d\u0435 \u043f\u043e\u0434\u0442\u0432\u0435\u0440\u0434\u0438\u043b)"))
         if len(a) > I_ESCALATION_1H and a[I_ESCALATION_1H]:
             ev.append((a[I_ESCALATION_1H], "\u044d\u0441\u043a\u0430\u043b\u0430\u0446\u0438\u044f: \u043d\u0435 \u043f\u043e\u0434\u0442\u0432\u0435\u0440\u0434\u0438\u043b"))
         if len(a) > I_CHECKIN_30M and a[I_CHECKIN_30M]:
             ev.append((a[I_CHECKIN_30M], "\u043d\u0430\u043f\u043e\u043c\u0438\u043d\u0430\u043d\u0438\u0435 \u0447\u0435\u043a-\u0438\u043d 30\u043c"))
+        if len(a) > I_CHECKIN_15M and a[I_CHECKIN_15M]:
+            ev.append((a[I_CHECKIN_15M], "\u043d\u0430\u043f\u043e\u043c\u0438\u043d\u0430\u043d\u0438\u0435 \u0447\u0435\u043a-\u0438\u043d 15\u043c"))
         if len(a) > I_CHECKOUT_30M and a[I_CHECKOUT_30M]:
             ev.append((a[I_CHECKOUT_30M], "\u043d\u0430\u043f\u043e\u043c\u0438\u043d\u0430\u043d\u0438\u0435 \u0447\u0435\u043a-\u0430\u0443\u0442 30\u043c"))
         if len(a) > I_FORGOT_CO and a[I_FORGOT_CO]:
