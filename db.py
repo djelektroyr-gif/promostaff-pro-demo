@@ -10,6 +10,8 @@ from urllib.parse import urlparse
 import psycopg2
 
 from config import DATABASE_URL
+from config import BILLING_ROUNDING_MODE, LATE_CHECKIN_PENALTY_FIRST_30M_HOURS
+from services.time_utils import now_local_naive, shift_start_end_local_naive
 
 # База всегда рядом с кодом (не зависит от текущей директории при запуске)
 DB_PATH = Path(__file__).resolve().parent / "promostaff_demo.db"
@@ -288,18 +290,28 @@ def init_db():
         cur.execute("ALTER TABLE assignments ADD COLUMN assigned_notify_sent_at TIMESTAMP")
     if "reminder_12h_sent_at" not in assignment_cols:
         cur.execute("ALTER TABLE assignments ADD COLUMN reminder_12h_sent_at TIMESTAMP")
+    if "reminder_12h_repeat_last_at" not in assignment_cols:
+        cur.execute("ALTER TABLE assignments ADD COLUMN reminder_12h_repeat_last_at TIMESTAMP")
     if "reminder_3h_sent_at" not in assignment_cols:
         cur.execute("ALTER TABLE assignments ADD COLUMN reminder_3h_sent_at TIMESTAMP")
+    if "escalation_11h_sent_at" not in assignment_cols:
+        cur.execute("ALTER TABLE assignments ADD COLUMN escalation_11h_sent_at TIMESTAMP")
     if "escalation_1h_sent_at" not in assignment_cols:
         cur.execute("ALTER TABLE assignments ADD COLUMN escalation_1h_sent_at TIMESTAMP")
     if "checkin_30m_sent_at" not in assignment_cols:
         cur.execute("ALTER TABLE assignments ADD COLUMN checkin_30m_sent_at TIMESTAMP")
+    if "checkin_15m_sent_at" not in assignment_cols:
+        cur.execute("ALTER TABLE assignments ADD COLUMN checkin_15m_sent_at TIMESTAMP")
     if "checkout_30m_sent_at" not in assignment_cols:
         cur.execute("ALTER TABLE assignments ADD COLUMN checkout_30m_sent_at TIMESTAMP")
     if "forgot_checkout_sent_at" not in assignment_cols:
         cur.execute("ALTER TABLE assignments ADD COLUMN forgot_checkout_sent_at TIMESTAMP")
     if "late_checkin_notified_at" not in assignment_cols:
         cur.execute("ALTER TABLE assignments ADD COLUMN late_checkin_notified_at TIMESTAMP")
+    if "no_confirm_flagged_at" not in assignment_cols:
+        cur.execute("ALTER TABLE assignments ADD COLUMN no_confirm_flagged_at TIMESTAMP")
+    if "no_checkin_start_notified_at" not in assignment_cols:
+        cur.execute("ALTER TABLE assignments ADD COLUMN no_checkin_start_notified_at TIMESTAMP")
     if "extension_request_minutes" not in assignment_cols:
         cur.execute("ALTER TABLE assignments ADD COLUMN extension_request_minutes INTEGER")
     if "extension_request_status" not in assignment_cols:
@@ -314,6 +326,12 @@ def init_db():
         cur.execute("ALTER TABLE assignments ADD COLUMN checkin_lng REAL")
     if "checkin_geo_ok" not in assignment_cols:
         cur.execute("ALTER TABLE assignments ADD COLUMN checkin_geo_ok INTEGER")
+    if "billed_hours" not in assignment_cols:
+        cur.execute("ALTER TABLE assignments ADD COLUMN billed_hours REAL DEFAULT 0")
+    if "penalty_hours" not in assignment_cols:
+        cur.execute("ALTER TABLE assignments ADD COLUMN penalty_hours REAL DEFAULT 0")
+    if "billing_rounding_mode" not in assignment_cols:
+        cur.execute("ALTER TABLE assignments ADD COLUMN billing_rounding_mode TEXT")
 
     cur.execute(
         """
@@ -326,7 +344,8 @@ def init_db():
             status TEXT DEFAULT 'pending',
             completed_at TIMESTAMP,
             report_text TEXT,
-            report_photo TEXT
+            report_photo TEXT,
+            assigned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """
     )
@@ -372,6 +391,55 @@ def init_db():
     """
     )
     cur.execute("CREATE INDEX IF NOT EXISTS idx_admin_logs_created_at ON admin_logs(created_at DESC)")
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS notification_failures (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id INTEGER,
+            context TEXT,
+            message TEXT,
+            error TEXT,
+            attempts INTEGER DEFAULT 1,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS scheduler_locks (
+            lock_name TEXT PRIMARY KEY,
+            owner_id TEXT,
+            expires_at TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS shift_replacements (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            shift_id INTEGER NOT NULL,
+            old_worker_id INTEGER NOT NULL,
+            new_worker_id INTEGER NOT NULL,
+            actor_user_id INTEGER NOT NULL,
+            reason TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS assignment_breaks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            shift_id INTEGER NOT NULL,
+            worker_id INTEGER NOT NULL,
+            break_type TEXT NOT NULL,
+            started_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            ended_at TIMESTAMP,
+            note TEXT
+        )
+        """
+    )
 
     # Миграция: у старых БД может не быть колонки workers.status
     cur.execute("PRAGMA table_info(workers)")
@@ -392,6 +460,9 @@ def init_db():
 
     cur.execute("PRAGMA table_info(tasks)")
     task_cols = {r[1] for r in cur.fetchall()}
+    if "assigned_at" not in task_cols:
+        cur.execute("ALTER TABLE tasks ADD COLUMN assigned_at TIMESTAMP")
+    cur.execute("UPDATE tasks SET assigned_at = COALESCE(assigned_at, CURRENT_TIMESTAMP)")
     if "client_rating" not in task_cols:
         cur.execute("ALTER TABLE tasks ADD COLUMN client_rating INTEGER")
     if "client_rated_at" not in task_cols:
@@ -1083,6 +1154,152 @@ def get_shift_assignments(shift_id: int) -> list:
     return rows
 
 
+def replace_assignment_worker(shift_id: int, old_worker_id: int, new_worker_id: int) -> dict:
+    """
+    Без потери данных:
+    - старого исполнителя не удаляем, а переводим в cancelled (если не начал смену);
+    - нового добавляем в assignments в pending.
+    """
+    conn = db_connect()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT status FROM assignments WHERE shift_id = ? AND worker_id = ?",
+        (shift_id, old_worker_id),
+    )
+    old_row = cur.fetchone()
+    if not old_row:
+        conn.close()
+        return {"ok": False, "reason": "old_not_found"}
+    old_status = str(old_row[0] or "")
+    if old_status in ("checked_in", "checked_out"):
+        conn.close()
+        return {"ok": False, "reason": "old_already_started"}
+    cur.execute(
+        "SELECT 1 FROM assignments WHERE shift_id = ? AND worker_id = ?",
+        (shift_id, new_worker_id),
+    )
+    if cur.fetchone():
+        conn.close()
+        return {"ok": False, "reason": "new_already_assigned"}
+    cur.execute(
+        """
+        UPDATE assignments
+        SET status = 'cancelled'
+        WHERE shift_id = ? AND worker_id = ? AND status NOT IN ('checked_in', 'checked_out')
+        """,
+        (shift_id, old_worker_id),
+    )
+    cur.execute(
+        "INSERT INTO assignments (shift_id, worker_id, status) VALUES (?, ?, 'pending')",
+        (shift_id, new_worker_id),
+    )
+    conn.commit()
+    conn.close()
+    return {"ok": True, "reason": "replaced"}
+
+
+def list_unconfirmed_assignments(shift_id: int) -> list:
+    conn = db_connect()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT a.id, a.worker_id, a.status, a.confirmed_at, w.full_name
+        FROM assignments a
+        LEFT JOIN workers w ON w.user_id = a.worker_id
+        WHERE a.shift_id = ? AND a.status IN ('pending')
+        ORDER BY a.id
+        """,
+        (shift_id,),
+    )
+    rows = cur.fetchall()
+    conn.close()
+    return rows
+
+
+def start_assignment_break(shift_id: int, worker_id: int, break_type: str, note: str = "") -> bool:
+    conn = db_connect()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT 1 FROM assignment_breaks
+        WHERE shift_id = ? AND worker_id = ? AND ended_at IS NULL
+        LIMIT 1
+        """,
+        (shift_id, worker_id),
+    )
+    if cur.fetchone():
+        conn.close()
+        return False
+    cur.execute(
+        """
+        INSERT INTO assignment_breaks (shift_id, worker_id, break_type, note)
+        VALUES (?, ?, ?, ?)
+        """,
+        (shift_id, worker_id, break_type, (note or "")[:500]),
+    )
+    conn.commit()
+    conn.close()
+    return True
+
+
+def stop_assignment_break(shift_id: int, worker_id: int) -> bool:
+    conn = db_connect()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        UPDATE assignment_breaks
+        SET ended_at = CURRENT_TIMESTAMP
+        WHERE id = (
+            SELECT id FROM assignment_breaks
+            WHERE shift_id = ? AND worker_id = ? AND ended_at IS NULL
+            ORDER BY started_at DESC
+            LIMIT 1
+        )
+        """,
+        (shift_id, worker_id),
+    )
+    ok = cur.rowcount > 0
+    conn.commit()
+    conn.close()
+    return ok
+
+
+def get_active_break(shift_id: int, worker_id: int):
+    conn = db_connect()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT id, break_type, started_at, note
+        FROM assignment_breaks
+        WHERE shift_id = ? AND worker_id = ? AND ended_at IS NULL
+        ORDER BY started_at DESC
+        LIMIT 1
+        """,
+        (shift_id, worker_id),
+    )
+    row = cur.fetchone()
+    conn.close()
+    return row
+
+
+def get_shift_breaks(shift_id: int) -> list:
+    conn = db_connect()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT b.id, b.shift_id, b.worker_id, b.break_type, b.started_at, b.ended_at, b.note, w.full_name
+        FROM assignment_breaks b
+        LEFT JOIN workers w ON w.user_id = b.worker_id
+        WHERE b.shift_id = ?
+        ORDER BY b.started_at
+        """,
+        (shift_id,),
+    )
+    rows = cur.fetchall()
+    conn.close()
+    return rows
+
+
 def assignment_join_worker_name(row: tuple) -> str:
     """Имя в строке SELECT a.*, w.full_name, w.phone (full_name всегда предпоследний столбец)."""
     if len(row) >= 2 and row[-2]:
@@ -1137,6 +1354,30 @@ def set_assignment_checkin_geo_failed(shift_id: int, worker_id: int) -> None:
     conn.close()
 
 
+def _round_hours(hours: float, mode: str) -> float:
+    if hours <= 0:
+        return 0.0
+    mode = (mode or "none").strip().lower()
+    if mode == "quarter_up":
+        return (int(hours * 4 + 0.999999) / 4.0)
+    if mode == "half_up":
+        return (int(hours * 2 + 0.999999) / 2.0)
+    if mode == "hour_up":
+        return float(int(hours + 0.999999))
+    return hours
+
+
+def _late_checkin_penalty_hours(checkin_time: datetime, shift_date: str, start_time: str, end_time: str) -> float:
+    try:
+        shift_start, _ = shift_start_end_local_naive(str(shift_date), str(start_time), str(end_time))
+    except Exception:
+        return 0.0
+    delay_sec = (checkin_time - shift_start).total_seconds()
+    if 0 < delay_sec <= 30 * 60:
+        return max(0.0, float(LATE_CHECKIN_PENALTY_FIRST_30M_HOURS))
+    return 0.0
+
+
 def do_checkout(shift_id: int, worker_id: int, photo_url: str | None = None):
     conn = db_connect()
     cur = conn.cursor()
@@ -1147,22 +1388,37 @@ def do_checkout(shift_id: int, worker_id: int, photo_url: str | None = None):
     row = cur.fetchone()
     if row and row[0]:
         checkin_time = _parse_sqlite_ts(row[0])
-        now = datetime.now()
-        hours = (now - checkin_time).total_seconds() / 3600.0
+        now = now_local_naive()
+        hours_actual = max(0.0, (now - checkin_time).total_seconds() / 3600.0)
 
-        cur.execute("SELECT rate FROM shifts WHERE id = ?", (shift_id,))
+        cur.execute("SELECT shift_date, start_time, end_time, rate FROM shifts WHERE id = ?", (shift_id,))
         shift_row = cur.fetchone()
-        rate = shift_row[0] if shift_row else 500
+        if shift_row:
+            shift_date, start_time, end_time, rate = shift_row
+        else:
+            shift_date, start_time, end_time, rate = "", "00:00", "00:00", 500
 
-        payment = hours * float(rate)
+        penalty_h = _late_checkin_penalty_hours(checkin_time, str(shift_date), str(start_time), str(end_time))
+        billed_before_round = max(0.0, hours_actual - penalty_h)
+        billed_h = _round_hours(billed_before_round, BILLING_ROUNDING_MODE)
+        payment = billed_h * float(rate)
 
         cur.execute(
             """
             UPDATE assignments SET status = 'checked_out', checkout_time = CURRENT_TIMESTAMP,
-            checkout_photo = ?, hours_worked = ?, payment = ?
+            checkout_photo = ?, hours_worked = ?, billed_hours = ?, penalty_hours = ?, billing_rounding_mode = ?, payment = ?
             WHERE shift_id = ? AND worker_id = ?
         """,
-            (photo_url, hours, payment, shift_id, worker_id),
+            (
+                photo_url,
+                hours_actual,
+                billed_h,
+                penalty_h,
+                BILLING_ROUNDING_MODE,
+                payment,
+                shift_id,
+                worker_id,
+            ),
         )
 
     conn.commit()
@@ -1196,9 +1452,9 @@ def list_assignments_for_scheduler() -> list:
         """
         SELECT
             a.id, a.shift_id, a.worker_id, a.status,
-            a.assigned_notify_sent_at, a.reminder_12h_sent_at, a.reminder_3h_sent_at,
-            a.escalation_1h_sent_at, a.checkin_30m_sent_at, a.checkout_30m_sent_at,
-            a.forgot_checkout_sent_at, a.late_checkin_notified_at,
+            a.assigned_notify_sent_at, a.reminder_12h_sent_at, a.reminder_12h_repeat_last_at, a.reminder_3h_sent_at,
+            a.escalation_11h_sent_at, a.escalation_1h_sent_at, a.checkin_30m_sent_at, a.checkin_15m_sent_at, a.checkout_30m_sent_at,
+            a.forgot_checkout_sent_at, a.late_checkin_notified_at, a.no_confirm_flagged_at, a.no_checkin_start_notified_at,
             a.extension_request_minutes, a.extension_request_status,
             s.shift_date, s.start_time, s.end_time, s.location, s.status,
             p.client_id,
@@ -1215,16 +1471,163 @@ def list_assignments_for_scheduler() -> list:
     return rows
 
 
+def list_risky_assignments(kind: str = "all", limit: int = 100) -> list:
+    """
+    Риск-срез для админ-дашборда.
+    kind:
+      - all: no_confirm + late/no_checkin
+      - no_confirm: нет подтверждения после 11ч-эскалации
+      - late: зафиксировано опоздание/нет чек-ина к старту
+    """
+    conn = db_connect()
+    cur = conn.cursor()
+    base = """
+        SELECT
+            a.id,
+            a.shift_id,
+            a.worker_id,
+            a.status,
+            a.no_confirm_flagged_at,
+            a.no_checkin_start_notified_at,
+            a.late_checkin_notified_at,
+            s.shift_date,
+            s.start_time,
+            s.end_time,
+            s.location,
+            p.client_id,
+            COALESCE(w.full_name, a.worker_id),
+            p.name
+        FROM assignments a
+        JOIN shifts s ON s.id = a.shift_id
+        JOIN projects p ON p.id = s.project_id
+        LEFT JOIN workers w ON w.user_id = a.worker_id
+        WHERE s.status IN ('open', 'in_progress')
+    """
+    if kind == "no_confirm":
+        where = " AND a.no_confirm_flagged_at IS NOT NULL"
+    elif kind == "late":
+        where = " AND (a.no_checkin_start_notified_at IS NOT NULL OR a.late_checkin_notified_at IS NOT NULL)"
+    else:
+        where = (
+            " AND (a.no_confirm_flagged_at IS NOT NULL OR "
+            "a.no_checkin_start_notified_at IS NOT NULL OR a.late_checkin_notified_at IS NOT NULL)"
+        )
+    sql = (
+        base
+        + where
+        + """
+        ORDER BY s.shift_date DESC, s.start_time DESC, a.id DESC
+        LIMIT ?
+        """
+    )
+    cur.execute(sql, (limit,))
+    rows = cur.fetchall()
+    conn.close()
+    return rows
+
+
+def record_notification_failure(
+    chat_id: int,
+    context: str,
+    message: str,
+    error: str,
+    attempts: int,
+) -> None:
+    conn = db_connect()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO notification_failures (chat_id, context, message, error, attempts)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (chat_id, context, message, error, attempts),
+    )
+    conn.commit()
+    conn.close()
+
+
+def acquire_scheduler_lock(lock_name: str, owner_id: str, ttl_sec: int = 90) -> bool:
+    now = now_local_naive()
+    expires = now + timedelta(seconds=max(30, int(ttl_sec)))
+    conn = db_connect()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT owner_id, expires_at FROM scheduler_locks WHERE lock_name = ?",
+        (lock_name,),
+    )
+    row = cur.fetchone()
+    if not row:
+        cur.execute(
+            """
+            INSERT INTO scheduler_locks (lock_name, owner_id, expires_at, updated_at)
+            VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+            """,
+            (lock_name, owner_id, expires.isoformat(sep=" ")),
+        )
+        conn.commit()
+        conn.close()
+        return True
+
+    cur_owner = str(row[0] or "")
+    cur_exp = row[1]
+    exp_dt = None
+    try:
+        exp_dt = _parse_sqlite_ts(cur_exp) if cur_exp else None
+    except Exception:
+        exp_dt = None
+
+    can_take = (exp_dt is None) or (exp_dt <= now) or (cur_owner == owner_id)
+    if can_take:
+        cur.execute(
+            """
+            UPDATE scheduler_locks
+            SET owner_id = ?, expires_at = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE lock_name = ?
+            """,
+            (owner_id, expires.isoformat(sep=" "), lock_name),
+        )
+        conn.commit()
+        conn.close()
+        return True
+    conn.close()
+    return False
+
+
+def log_shift_replacement(
+    shift_id: int,
+    old_worker_id: int,
+    new_worker_id: int,
+    actor_user_id: int,
+    reason: str = "",
+) -> None:
+    conn = db_connect()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO shift_replacements (shift_id, old_worker_id, new_worker_id, actor_user_id, reason)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (shift_id, old_worker_id, new_worker_id, actor_user_id, reason[:500]),
+    )
+    conn.commit()
+    conn.close()
+
+
 def mark_assignment_event(assignment_id: int, field: str) -> None:
     allowed = {
         "assigned_notify_sent_at",
         "reminder_12h_sent_at",
+        "reminder_12h_repeat_last_at",
         "reminder_3h_sent_at",
+        "escalation_11h_sent_at",
         "escalation_1h_sent_at",
         "checkin_30m_sent_at",
+        "checkin_15m_sent_at",
         "checkout_30m_sent_at",
         "forgot_checkout_sent_at",
         "late_checkin_notified_at",
+        "no_confirm_flagged_at",
+        "no_checkin_start_notified_at",
     }
     if field not in allowed:
         return
@@ -1239,12 +1642,17 @@ def mark_assignment_event_by_shift_worker(shift_id: int, worker_id: int, field: 
     allowed = {
         "assigned_notify_sent_at",
         "reminder_12h_sent_at",
+        "reminder_12h_repeat_last_at",
         "reminder_3h_sent_at",
+        "escalation_11h_sent_at",
         "escalation_1h_sent_at",
         "checkin_30m_sent_at",
+        "checkin_15m_sent_at",
         "checkout_30m_sent_at",
         "forgot_checkout_sent_at",
         "late_checkin_notified_at",
+        "no_confirm_flagged_at",
+        "no_checkin_start_notified_at",
     }
     if field not in allowed:
         return

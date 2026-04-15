@@ -5,6 +5,7 @@ from datetime import datetime
 
 from services.shift_notifier import _shift_start_end
 from db import format_date_ru
+from services.time_utils import now_local_naive
 
 I_ASSIGNED_NOTIFY = 11
 I_REMINDER_12H = 12
@@ -126,7 +127,7 @@ def format_shift_hub(
     shift = rep.get("shift")
     if not shift:
         return "\u0421\u043c\u0435\u043d\u0430 \u043d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d\u0430."
-    now = now or datetime.now()
+    now = now or now_local_naive()
     shift_id = shift[0]
     shift_date = str(shift[2])
     st_t = str(shift[3] or "")

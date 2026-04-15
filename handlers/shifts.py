@@ -12,11 +12,20 @@ from db import (
     get_worker,
     get_shift,
     get_shift_assignments,
+    get_workers_assignable,
+    list_open_shifts_admin,
+    list_unconfirmed_assignments,
+    replace_assignment_worker,
+    log_shift_replacement,
     get_assignment,
     confirm_assignment,
     do_checkin,
     do_checkout,
     get_shift_report,
+    get_shift_breaks,
+    get_active_break,
+    start_assignment_break,
+    stop_assignment_break,
     list_shifts_for_client,
     list_shifts_for_worker,
     client_owns_shift,
@@ -30,6 +39,7 @@ from db import (
     format_date_ru,
 )
 from config import ADMIN_USER_ID
+from services.time_utils import now_local_naive, shift_start_end_local_naive
 from states import CheckinFlow, CheckoutFlow, ShiftExtensionFlow, ClientMessageWorkerFlow
 
 router = Router()
@@ -65,9 +75,35 @@ def _shift_geo_limits(shift: tuple | None) -> tuple[float | None, float | None, 
 
 
 def _shift_start(shift: tuple) -> datetime:
-    raw = str(shift[3] or "").strip()
-    hhmm = raw[:5] if len(raw) >= 5 else raw
-    return datetime.strptime(f"{shift[2]} {hhmm}", "%Y-%m-%d %H:%M")
+    start, _ = shift_start_end_local_naive(str(shift[2]), str(shift[3]), str(shift[4]))
+    return start
+
+
+def _assignment_status_line(a: tuple) -> str:
+    status = str(a[A_STATUS] or "")
+    confirmed_at = str(a[4] or "—")
+    if status == "pending":
+        return f"⏳ Не подтвердил (подтверждение: {confirmed_at})"
+    if status == "confirmed":
+        return f"✅ Подтвердил ({confirmed_at})"
+    if status == "checked_in":
+        return f"🔵 На смене (чек-ин: {a[5] or '—'})"
+    if status == "checked_out":
+        return f"⚪ Завершил (чек-аут: {a[7] or '—'})"
+    if status == "cancelled":
+        return "🚫 Отменён"
+    return status
+
+
+def _parse_ts(value):
+    if not value:
+        return None
+    s = str(value)
+    s = s.replace(" ", "T", 1) if "T" not in s else s
+    try:
+        return datetime.fromisoformat(s)
+    except Exception:
+        return None
 
 
 @router.callback_query(F.data == "my_shifts")
@@ -136,6 +172,284 @@ async def show_my_shifts(callback: types.CallbackQuery):
             "Не удалось определить роль. Нажмите /start и завершите регистрацию."
         )
     await callback.answer()
+
+
+@router.callback_query(F.data == "client_shift_statuses")
+async def client_shift_statuses(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    if not get_client(user_id):
+        await callback.answer("Только для заказчика.", show_alert=True)
+        return
+    shifts = list_shifts_for_client(user_id)
+    if not shifts:
+        await callback.message.edit_text(
+            "📡 Пока нет смен для контроля подтверждений.",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text="🔙 Назад", callback_data="main_menu")]]
+            ),
+        )
+        await callback.answer()
+        return
+    rows = []
+    text = "📡 *Статус выхода на смену*\n\nВыберите смену:\n"
+    for s in shifts[:30]:
+        sid, shift_date, st, et, _loc, project_name, _status = s
+        text += f"• #{sid} {format_date_ru(shift_date)} {st}-{et} | {project_name}\n"
+        rows.append([InlineKeyboardButton(text=f"Смена #{sid}", callback_data=f"shift_status_view_{sid}")])
+    rows.append([InlineKeyboardButton(text="🔙 Назад", callback_data="main_menu")])
+    await callback.message.edit_text(
+        text,
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin_shift_statuses")
+async def admin_shift_statuses(callback: types.CallbackQuery):
+    if callback.from_user.id != int(ADMIN_USER_ID):
+        await callback.answer("Нет доступа.", show_alert=True)
+        return
+    shifts = list_open_shifts_admin(50)
+    if not shifts:
+        await callback.message.edit_text(
+            "📡 Нет открытых смен.",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back")]]
+            ),
+        )
+        await callback.answer()
+        return
+    rows = []
+    text = "📡 *Статус выхода на смену (админ)*\n\nВыберите смену:\n"
+    for s in shifts:
+        sid, shift_date, st, et, project_name, _status = s
+        text += f"• #{sid} {format_date_ru(str(shift_date))} {st}-{et} | {project_name}\n"
+        rows.append([InlineKeyboardButton(text=f"Смена #{sid}", callback_data=f"shift_status_view_{sid}")])
+    rows.append([InlineKeyboardButton(text="🔙 В админ-панель", callback_data="admin_back")])
+    await callback.message.edit_text(
+        text,
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("shift_status_view_"))
+async def shift_status_view(callback: types.CallbackQuery):
+    shift_id = int(callback.data.replace("shift_status_view_", ""))
+    user_id = callback.from_user.id
+    is_admin = user_id == int(ADMIN_USER_ID)
+    if not is_admin and (not get_client(user_id) or not client_owns_shift(user_id, shift_id)):
+        await callback.answer("Нет доступа.", show_alert=True)
+        return
+    shift = get_shift(shift_id)
+    if not shift:
+        await callback.message.edit_text("❌ Смена не найдена.")
+        await callback.answer()
+        return
+    assignments = get_shift_assignments(shift_id)
+    text = (
+        f"📡 *Статус подтверждения по смене #{shift_id}*\n\n"
+        f"📆 {format_date_ru(shift[2])} {shift[3]}-{shift[4]}\n"
+        f"📍 {shift[5]}\n\n"
+    )
+    if not assignments:
+        text += "Назначений пока нет.\n"
+    else:
+        pending_cnt = 0
+        for a in assignments:
+            name = _assign_worker_name(a)
+            text += f"• {name}: {_assignment_status_line(a)}\n"
+            if str(a[A_STATUS]) == "pending":
+                pending_cnt += 1
+        if pending_cnt == 0:
+            text += "\n✅ Выход подтверждён всеми назначенными исполнителями.\n"
+    rows = [
+        [InlineKeyboardButton(text="🔔 Запросить подтверждение неподтвердивших", callback_data=f"shift_status_ping_{shift_id}")],
+        [InlineKeyboardButton(text="🔁 Заменить исполнителя", callback_data=f"shift_replace_pick_{shift_id}")],
+        [InlineKeyboardButton(text="🔄 Обновить", callback_data=f"shift_status_view_{shift_id}")],
+    ]
+    rows.append(
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="admin_shift_statuses" if is_admin else "client_shift_statuses")]
+    )
+    await callback.message.edit_text(
+        text,
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("shift_status_ping_"))
+async def shift_status_ping(callback: types.CallbackQuery):
+    shift_id = int(callback.data.replace("shift_status_ping_", ""))
+    user_id = callback.from_user.id
+    is_admin = user_id == int(ADMIN_USER_ID)
+    if not is_admin and (not get_client(user_id) or not client_owns_shift(user_id, shift_id)):
+        await callback.answer("Нет доступа.", show_alert=True)
+        return
+    pending = list_unconfirmed_assignments(shift_id)
+    if not pending:
+        await callback.answer("Все исполнители уже подтвердили выход.", show_alert=True)
+        return
+    sent = 0
+    for _aid, worker_id, _st, _conf_at, full_name in pending:
+        try:
+            await callback.bot.send_message(
+                int(worker_id),
+                f"🔔 Напоминание по смене #{shift_id}: подтвердите выход в карточке смены.",
+                reply_markup=InlineKeyboardMarkup(
+                    inline_keyboard=[
+                        [InlineKeyboardButton(text="Открыть смену", callback_data=f"worker_shift_{shift_id}")]
+                    ]
+                ),
+            )
+            sent += 1
+        except Exception:
+            # не прерываем общий цикл отправки
+            _ = full_name
+    await callback.answer(f"Отправлено напоминаний: {sent}", show_alert=True)
+
+
+@router.callback_query(F.data.startswith("shift_replace_pick_"))
+async def shift_replace_pick(callback: types.CallbackQuery):
+    shift_id = int(callback.data.replace("shift_replace_pick_", ""))
+    user_id = callback.from_user.id
+    is_admin = user_id == int(ADMIN_USER_ID)
+    if not is_admin and (not get_client(user_id) or not client_owns_shift(user_id, shift_id)):
+        await callback.answer("Нет доступа.", show_alert=True)
+        return
+    assignments = get_shift_assignments(shift_id)
+    candidates = [a for a in assignments if str(a[A_STATUS]) in ("pending", "confirmed")]
+    if not candidates:
+        await callback.answer("Нет кандидатов для замены.", show_alert=True)
+        return
+    rows = []
+    for a in candidates:
+        name = _assign_worker_name(a)
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=f"Заменить: {name}",
+                    callback_data=f"shift_replace_from_{shift_id}_{int(a[2])}",
+                )
+            ]
+        )
+    rows.append([InlineKeyboardButton(text="🔙 Назад", callback_data=f"shift_status_view_{shift_id}")])
+    await callback.message.edit_text(
+        "🔁 Выберите исполнителя, которого нужно заменить:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("shift_replace_from_"))
+async def shift_replace_from(callback: types.CallbackQuery):
+    _, _, _, shift_raw, old_raw = callback.data.split("_", 4)
+    shift_id = int(shift_raw)
+    old_worker_id = int(old_raw)
+    user_id = callback.from_user.id
+    is_admin = user_id == int(ADMIN_USER_ID)
+    if not is_admin and (not get_client(user_id) or not client_owns_shift(user_id, shift_id)):
+        await callback.answer("Нет доступа.", show_alert=True)
+        return
+    assigned_ids = {int(a[2]) for a in get_shift_assignments(shift_id)}
+    workers = get_workers_assignable()
+    rows = []
+    for w in workers:
+        wid = int(w[0])
+        if wid in assigned_ids:
+            continue
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=f"{w[1]} ({w[3]})",
+                    callback_data=f"shift_replace_to_{shift_id}_{old_worker_id}_{wid}",
+                )
+            ]
+        )
+    rows.append([InlineKeyboardButton(text="🔙 Назад", callback_data=f"shift_replace_pick_{shift_id}")])
+    await callback.message.edit_text(
+        "👥 Выберите нового исполнителя на замену:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("shift_replace_to_"))
+async def shift_replace_to(callback: types.CallbackQuery):
+    _, _, _, shift_raw, old_raw, new_raw = callback.data.split("_", 5)
+    shift_id = int(shift_raw)
+    old_worker_id = int(old_raw)
+    new_worker_id = int(new_raw)
+    user_id = callback.from_user.id
+    is_admin = user_id == int(ADMIN_USER_ID)
+    if not is_admin and (not get_client(user_id) or not client_owns_shift(user_id, shift_id)):
+        await callback.answer("Нет доступа.", show_alert=True)
+        return
+    result = replace_assignment_worker(shift_id, old_worker_id, new_worker_id)
+    if not result.get("ok"):
+        await callback.answer(f"Не удалось заменить: {result.get('reason')}", show_alert=True)
+        return
+    shift_owner = get_shift_with_owner(shift_id)
+    try:
+        await callback.bot.send_message(
+            int(old_worker_id),
+            f"ℹ️ Вы сняты со смены #{shift_id}. Если это ошибка — свяжитесь с менеджером.",
+        )
+    except Exception:
+        pass
+    try:
+        await callback.bot.send_message(
+            int(new_worker_id),
+            f"📌 Вас назначили на смену #{shift_id}. Подтвердите выход в карточке смены.",
+        )
+    except Exception:
+        pass
+    try:
+        await callback.bot.send_message(int(ADMIN_USER_ID), f"🔁 Замена по смене #{shift_id}: {old_worker_id} → {new_worker_id}.")
+        if shift_owner and shift_owner[7]:
+            await callback.bot.send_message(int(shift_owner[7]), f"🔁 По смене #{shift_id} выполнена замена исполнителя.")
+    except Exception:
+        pass
+    try:
+        log_shift_replacement(
+            shift_id=shift_id,
+            old_worker_id=old_worker_id,
+            new_worker_id=new_worker_id,
+            actor_user_id=callback.from_user.id,
+            reason="manual_replace_from_status_screen",
+        )
+    except Exception:
+        pass
+    shift = get_shift(shift_id)
+    assignments = get_shift_assignments(shift_id)
+    text = (
+        f"📡 *Статус подтверждения по смене #{shift_id}*\n\n"
+        f"📆 {format_date_ru(shift[2])} {shift[3]}-{shift[4]}\n"
+        f"📍 {shift[5]}\n\n"
+    )
+    for a in assignments:
+        name = _assign_worker_name(a)
+        text += f"• {name}: {_assignment_status_line(a)}\n"
+    rows = [
+        [InlineKeyboardButton(text="🔔 Запросить подтверждение неподтвердивших", callback_data=f"shift_status_ping_{shift_id}")],
+        [InlineKeyboardButton(text="🔁 Заменить исполнителя", callback_data=f"shift_replace_pick_{shift_id}")],
+        [InlineKeyboardButton(text="🔄 Обновить", callback_data=f"shift_status_view_{shift_id}")],
+        [
+            InlineKeyboardButton(
+                text="🔙 Назад",
+                callback_data="admin_shift_statuses" if is_admin else "client_shift_statuses",
+            )
+        ],
+    ]
+    await callback.message.edit_text(
+        text,
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+    )
+    await callback.answer("Замена выполнена.", show_alert=True)
 
 
 @router.callback_query(F.data == "my_projects")
@@ -311,6 +625,15 @@ async def worker_shift_detail(callback: types.CallbackQuery):
         keyboard_rows.append(
             [InlineKeyboardButton(text="✅ Чек-аут", callback_data=f"checkout_{shift_id}")]
         )
+        active_break = get_active_break(shift_id, user_id)
+        if active_break:
+            keyboard_rows.append(
+                [InlineKeyboardButton(text="▶️ Завершить перерыв", callback_data=f"break_stop_{shift_id}")]
+            )
+        else:
+            keyboard_rows.append(
+                [InlineKeyboardButton(text="⏸ Перерыв", callback_data=f"break_start_{shift_id}")]
+            )
 
     keyboard_rows.append(
         [InlineKeyboardButton(text="💬 Чат смены", callback_data=f"chat_{shift_id}")]
@@ -372,6 +695,68 @@ async def checkin_start(callback: types.CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
+@router.callback_query(F.data.startswith("break_start_"))
+async def break_start_menu(callback: types.CallbackQuery):
+    shift_id = int(callback.data.replace("break_start_", ""))
+    assignment = get_assignment(shift_id, callback.from_user.id)
+    if not assignment or assignment[3] != "checked_in":
+        await callback.answer("Перерыв доступен только во время смены (после чек-ина).", show_alert=True)
+        return
+    if get_active_break(shift_id, callback.from_user.id):
+        await callback.answer("У вас уже активен перерыв.", show_alert=True)
+        return
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🍽 Обед", callback_data=f"break_type_{shift_id}_lunch")],
+            [InlineKeyboardButton(text="🚬 Перекур", callback_data=f"break_type_{shift_id}_smoke")],
+            [InlineKeyboardButton(text="🚻 Тех. перерыв", callback_data=f"break_type_{shift_id}_tech")],
+            [InlineKeyboardButton(text="🔙 Назад к смене", callback_data=f"worker_shift_{shift_id}")],
+        ]
+    )
+    await callback.message.edit_text("⏸ Выберите тип перерыва:", reply_markup=kb)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("break_type_"))
+async def break_type_start(callback: types.CallbackQuery):
+    _, _, shift_raw, break_type = callback.data.split("_", 3)
+    shift_id = int(shift_raw)
+    assignment = get_assignment(shift_id, callback.from_user.id)
+    if not assignment or assignment[3] != "checked_in":
+        await callback.answer("Недоступно: нет активной смены.", show_alert=True)
+        return
+    ok = start_assignment_break(shift_id, callback.from_user.id, break_type, "")
+    if not ok:
+        await callback.answer("Перерыв уже запущен.", show_alert=True)
+        return
+    await callback.message.edit_text(
+        f"⏸ Перерыв начат ({break_type}).\nНажмите «Завершить перерыв», когда вернётесь.",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="▶️ Завершить перерыв", callback_data=f"break_stop_{shift_id}")],
+                [InlineKeyboardButton(text="🔙 К смене", callback_data=f"worker_shift_{shift_id}")],
+            ]
+        ),
+    )
+    await callback.answer("Перерыв запущен.")
+
+
+@router.callback_query(F.data.startswith("break_stop_"))
+async def break_stop_now(callback: types.CallbackQuery):
+    shift_id = int(callback.data.replace("break_stop_", ""))
+    ok = stop_assignment_break(shift_id, callback.from_user.id)
+    if not ok:
+        await callback.answer("Активный перерыв не найден.", show_alert=True)
+        return
+    await callback.message.edit_text(
+        "▶️ Перерыв завершён.",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="🔙 К смене", callback_data=f"worker_shift_{shift_id}")]]
+        ),
+    )
+    await callback.answer("Перерыв завершён.")
+
+
 @router.message(F.location, CheckinFlow.geo)
 async def checkin_geo_received(message: types.Message, state: FSMContext):
     data = await state.get_data()
@@ -383,7 +768,7 @@ async def checkin_geo_received(message: types.Message, state: FSMContext):
         await state.clear()
         return
     dt_start = _shift_start(shift)
-    now = datetime.now()
+    now = now_local_naive()
     if now < dt_start.replace(second=0, microsecond=0) and (dt_start - now).total_seconds() > 30 * 60:
         await message.answer(
             "⏳ Слишком рано для чек-ина. Чек-ин доступен за 30 минут до старта смены."
@@ -446,9 +831,9 @@ async def checkin_photo_received(message: types.Message, state: FSMContext):
     shift_owner = get_shift_with_owner(int(shift_id))
     if shift_owner:
         dt_start = _shift_start(shift_owner)
-        if datetime.now() > dt_start:
+        if now_local_naive() > dt_start:
             mark_assignment_event_by_shift_worker(int(shift_id), message.from_user.id, "late_checkin_notified_at")
-            delay_min = int((datetime.now() - dt_start).total_seconds() // 60)
+            delay_min = int((now_local_naive() - dt_start).total_seconds() // 60)
             late_text = (
                 f"⚠️ Исполнитель {message.from_user.full_name} отметил чек-ин по смене #{shift_id} "
                 f"с опозданием на {max(delay_min, 1)} мин."
@@ -713,12 +1098,58 @@ async def show_shift_report(callback: types.CallbackQuery):
     total_payment = 0
     for a in report["assignments"]:
         hours = float(a[9] or 0)
+        billed_h = float(a[26] or hours) if len(a) > 26 else hours
+        penalty_h = float(a[27] or 0) if len(a) > 27 else 0
         payment = float(a[10] or 0)
         total_payment += payment
         status = "✅" if a[A_STATUS] == "checked_out" else "⏳"
         name = _assign_worker_name(a)
-        text += f"{status} {name}: {hours:.1f} ч, {payment:.0f} ₽\n"
-    text += f"\n💰 *ИТОГО:* {total_payment:.0f} ₽"
+        extra = f" (штраф {penalty_h:.1f} ч)" if penalty_h > 0 else ""
+        text += f"{status} {name}: факт {hours:.1f} ч, к оплате {billed_h:.1f} ч{extra}, {payment:.0f} ₽\n"
+    text += f"\n💰 *ИТОГО:* {total_payment:.0f} ₽\n\n"
+
+    text += "📋 *ЗАДАЧИ:*\n"
+    tasks = report.get("tasks") or []
+    if not tasks:
+        text += "• задач нет\n"
+    else:
+        done = 0
+        for t in tasks:
+            # t.* + worker_name в конце
+            title = t[2] or "Задача"
+            t_status = str(t[5] or "")
+            # assigned_at миграционно находится в конце t.* (перед worker_name)
+            assigned_at = _parse_ts(t[-2] if len(t) >= 13 else None)
+            completed_at = _parse_ts(t[6] if len(t) > 6 else None)
+            worker_name = str(t[-1] or "Не назначен")
+            icon = "✅" if t_status == "completed" else "⏳"
+            if t_status == "completed":
+                done += 1
+            dur_line = ""
+            if assigned_at and completed_at and completed_at >= assigned_at:
+                mins = int((completed_at - assigned_at).total_seconds() // 60)
+                dur_line = f", время: {mins} мин"
+            elif completed_at:
+                dur_line = f", закрыта: {completed_at.strftime('%d.%m %H:%M')}"
+            text += f"{icon} {title} — {worker_name}{dur_line}\n"
+        text += f"Итого задач: {len(tasks)}, выполнено: {done}\n"
+
+    breaks = get_shift_breaks(shift_id)
+    if breaks:
+        text += "\n⏸ *ПЕРЕРЫВЫ:*\n"
+        by_worker: dict[int, int] = {}
+        by_name: dict[int, str] = {}
+        for b in breaks:
+            worker_id = int(b[2])
+            by_name[worker_id] = str(b[7] or worker_id)
+            st_dt = _parse_ts(b[4])
+            en_dt = _parse_ts(b[5])
+            if st_dt and en_dt and en_dt >= st_dt:
+                by_worker[worker_id] = by_worker.get(worker_id, 0) + int((en_dt - st_dt).total_seconds() // 60)
+        for wid, name in by_name.items():
+            total_m = by_worker.get(wid, 0)
+            text += f"• {name}: суммарно {total_m} мин\n"
+        text += "_Перерывы фиксируются для контроля; в расчёт оплаты пока не вычитаются._\n"
 
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[

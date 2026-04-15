@@ -75,3 +75,8 @@ class ShiftExtensionFlow(StatesGroup):
 
 class ClientMessageWorkerFlow(StatesGroup):
     text = State()
+
+
+class BreakNoteFlow(StatesGroup):
+    shift_id = State()
+    break_type = State()

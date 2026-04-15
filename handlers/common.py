@@ -5,7 +5,13 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 from db import get_worker, get_client
-from keyboards.menus import main_menu_keyboard
+from keyboards.menus import (
+    main_menu_keyboard,
+    client_overview_keyboard,
+    client_shifts_keyboard,
+    client_tasks_keyboard,
+    client_comms_keyboard,
+)
 from states import WorkerRegistration, ClientRegistration
 
 router = Router()
@@ -138,4 +144,56 @@ async def show_main_menu(callback: types.CallbackQuery):
         markup = main_menu_keyboard()
     
     await callback.message.edit_text(text, reply_markup=markup, parse_mode="Markdown")
+    await callback.answer()
+
+
+@router.callback_query(F.data == "client_menu_overview")
+async def client_menu_overview(callback: types.CallbackQuery):
+    if not get_client(callback.from_user.id):
+        await callback.answer("Только для заказчика.", show_alert=True)
+        return
+    await callback.message.edit_text(
+        "📊 *Обзор заказчика*\n\nПроекты, создание и общая навигация.",
+        parse_mode="Markdown",
+        reply_markup=client_overview_keyboard(),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "client_menu_shifts")
+async def client_menu_shifts(callback: types.CallbackQuery):
+    if not get_client(callback.from_user.id):
+        await callback.answer("Только для заказчика.", show_alert=True)
+        return
+    await callback.message.edit_text(
+        "🗓 *Смены и статусы*\n\nМониторинг смен и подтверждений исполнителей.",
+        parse_mode="Markdown",
+        reply_markup=client_shifts_keyboard(),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "client_menu_tasks")
+async def client_menu_tasks(callback: types.CallbackQuery):
+    if not get_client(callback.from_user.id):
+        await callback.answer("Только для заказчика.", show_alert=True)
+        return
+    await callback.message.edit_text(
+        "📋 *Задачи*\n\nПостановка и контроль выполнения задач по сменам.",
+        parse_mode="Markdown",
+        reply_markup=client_tasks_keyboard(),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "client_menu_comms")
+async def client_menu_comms(callback: types.CallbackQuery):
+    if not get_client(callback.from_user.id):
+        await callback.answer("Только для заказчика.", show_alert=True)
+        return
+    await callback.message.edit_text(
+        "💬 *Коммуникации*\n\nЧаты и оперативные контакты по сменам.",
+        parse_mode="Markdown",
+        reply_markup=client_comms_keyboard(),
+    )
     await callback.answer()

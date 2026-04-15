@@ -32,7 +32,9 @@ from db import (
     list_clients,
     delete_client_cascade,
     list_projects_admin,
+    get_shift_assignments,
     list_shifts_admin,
+    list_risky_assignments,
     format_date_ru,
 )
 
@@ -76,18 +78,57 @@ def admin_only(func):
 def _admin_main_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
+            [InlineKeyboardButton(text="📡 Мониторинг смен", callback_data="admin_menu_monitoring")],
+            [InlineKeyboardButton(text="👥 Люди", callback_data="admin_menu_people")],
+            [InlineKeyboardButton(text="🗂 Проекты и смены", callback_data="admin_menu_ops")],
+            [InlineKeyboardButton(text="⚙️ Сервис", callback_data="admin_menu_service")],
+        ]
+    )
+
+
+def _admin_monitoring_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
             [InlineKeyboardButton(text="📊 Метрики", callback_data="admin_metrics")],
+            [InlineKeyboardButton(text="📡 Статус выхода на смену", callback_data="admin_shift_statuses")],
+            [InlineKeyboardButton(text="🚨 Рисковые смены (дашборд)", callback_data="admin_risk_dashboard")],
+            [InlineKeyboardButton(text="📝 Лог действий", callback_data="admin_logs")],
+            [InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back")],
+        ]
+    )
+
+
+def _admin_people_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
             [InlineKeyboardButton(text="📋 Исполнители", callback_data="admin_workers")],
-            [InlineKeyboardButton(text="🗑 Удалить исполнителя", callback_data="admin_workers_delete")],
             [InlineKeyboardButton(text="🧭 Статусы исполнителей", callback_data="admin_worker_statuses")],
+            [InlineKeyboardButton(text="🗑 Удалить исполнителя", callback_data="admin_workers_delete")],
             [InlineKeyboardButton(text="🏢 Заказчики", callback_data="admin_clients")],
+            [InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back")],
+        ]
+    )
+
+
+def _admin_ops_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
             [InlineKeyboardButton(text="➕ Создать проект", callback_data="admin_create_project")],
             [InlineKeyboardButton(text="🗂 Управление проектами", callback_data="admin_project_manage")],
             [InlineKeyboardButton(text="📅 Создать смену", callback_data="admin_create_shift")],
             [InlineKeyboardButton(text="🗓 Управление сменами", callback_data="admin_shift_manage")],
             [InlineKeyboardButton(text="👥 Назначить на смену", callback_data="admin_assign")],
+            [InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back")],
+        ]
+    )
+
+
+def _admin_service_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
             [InlineKeyboardButton(text="🧪 Генератор тест-данных", callback_data="admin_seed_data")],
-            [InlineKeyboardButton(text="📝 Лог действий", callback_data="admin_logs")],
+            [InlineKeyboardButton(text="🧾 Статус БД", callback_data="admin_db_status")],
+            [InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back")],
         ]
     )
 
@@ -107,6 +148,64 @@ async def admin_panel(message: types.Message):
 async def db_status_cmd(message: types.Message):
     report = get_db_status_report()
     await message.answer("Статус БД\n\n" + report)
+
+
+@router.callback_query(F.data == "admin_menu_monitoring")
+@admin_only
+async def admin_menu_monitoring(callback: types.CallbackQuery):
+    await callback.message.edit_text(
+        "📡 *Мониторинг смен*\n\nВыберите действие:",
+        parse_mode="Markdown",
+        reply_markup=_admin_monitoring_keyboard(),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin_menu_people")
+@admin_only
+async def admin_menu_people(callback: types.CallbackQuery):
+    await callback.message.edit_text(
+        "👥 *Люди*\n\nИсполнители, статусы, заказчики:",
+        parse_mode="Markdown",
+        reply_markup=_admin_people_keyboard(),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin_menu_ops")
+@admin_only
+async def admin_menu_ops(callback: types.CallbackQuery):
+    await callback.message.edit_text(
+        "🗂 *Проекты и смены*\n\nСоздание и операционные действия:",
+        parse_mode="Markdown",
+        reply_markup=_admin_ops_keyboard(),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin_menu_service")
+@admin_only
+async def admin_menu_service(callback: types.CallbackQuery):
+    await callback.message.edit_text(
+        "⚙️ *Сервис*\n\nТехнические и вспомогательные функции:",
+        parse_mode="Markdown",
+        reply_markup=_admin_service_keyboard(),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin_db_status")
+@admin_only
+async def admin_db_status_cb(callback: types.CallbackQuery):
+    report = get_db_status_report()
+    await callback.message.edit_text(
+        f"🧾 *Статус БД*\n\n{report}",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="🔙 Назад", callback_data="admin_menu_service")]]
+        ),
+    )
+    await callback.answer()
 
 
 @router.callback_query(F.data == "admin_metrics")
@@ -131,6 +230,162 @@ async def admin_metrics(callback: types.CallbackQuery):
         ),
     )
     await callback.answer()
+
+
+def _risk_filter_keyboard(current: str) -> InlineKeyboardMarkup:
+    def mark(v: str, label: str) -> str:
+        return f"• {label}" if v == current else label
+
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text=mark("all", "Все риски"), callback_data="admin_risk_dashboard"),
+                InlineKeyboardButton(text=mark("no_confirm", "No confirm"), callback_data="admin_risk_dashboard_no_confirm"),
+                InlineKeyboardButton(text=mark("late", "Late/no check-in"), callback_data="admin_risk_dashboard_late"),
+            ],
+            [InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back")],
+        ]
+    )
+
+
+async def _render_risk_dashboard(callback: types.CallbackQuery, kind: str) -> None:
+    rows = list_risky_assignments(kind=kind, limit=100)
+    title = {
+        "all": "все риски",
+        "no_confirm": "no_confirm",
+        "late": "late/no_checkin",
+    }.get(kind, kind)
+    text = f"🚨 *Рисковые смены* ({title})\n\n"
+    if not rows:
+        text += "Рисков не найдено.\n"
+        await callback.message.edit_text(
+            text,
+            parse_mode="Markdown",
+            reply_markup=_risk_filter_keyboard(kind),
+        )
+        await callback.answer()
+        return
+
+    # Сводка
+    c_no_confirm = 0
+    c_late = 0
+    shift_ids: set[int] = set()
+    for r in rows:
+        shift_ids.add(int(r[1]))
+        if r[4]:
+            c_no_confirm += 1
+        if r[5] or r[6]:
+            c_late += 1
+    text += (
+        f"Смен с риском: *{len(shift_ids)}*\n"
+        f"No confirm: *{c_no_confirm}*\n"
+        f"Late/no check-in: *{c_late}*\n\n"
+    )
+
+    buttons: list[list[InlineKeyboardButton]] = []
+    for r in rows[:20]:
+        _aid, shift_id, worker_id, status, no_conf_at, no_checkin_at, late_at, shift_date, start, end, _loc, _cid, worker_name, project_name = r
+        flags = []
+        if no_conf_at:
+            flags.append("no_confirm")
+        if no_checkin_at or late_at:
+            flags.append("late")
+        fstr = ", ".join(flags) if flags else status
+        text += (
+            f"• Смена #{shift_id} | {format_date_ru(str(shift_date))} {start}-{end}\n"
+            f"  {worker_name} ({worker_id}) | {project_name}\n"
+            f"  Риск: `{fstr}`\n"
+        )
+        buttons.append(
+            [InlineKeyboardButton(text=f"🎯 Открыть смену #{shift_id}", callback_data=f"shift_status_view_{shift_id}")]
+        )
+        buttons.append(
+            [
+                InlineKeyboardButton(text="🔔 Пинг", callback_data=f"risk_ping_{shift_id}_{worker_id}"),
+                InlineKeyboardButton(text="✉️ Сообщение", callback_data=f"risk_msg_{shift_id}_{worker_id}"),
+                InlineKeyboardButton(text="🔁 Заменить", callback_data=f"shift_replace_from_{shift_id}_{worker_id}"),
+            ]
+        )
+    buttons.extend(_risk_filter_keyboard(kind).inline_keyboard)
+    await callback.message.edit_text(
+        text[:3900],
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin_risk_dashboard")
+@admin_only
+async def admin_risk_dashboard_all(callback: types.CallbackQuery):
+    await _render_risk_dashboard(callback, "all")
+
+
+@router.callback_query(F.data == "admin_risk_dashboard_no_confirm")
+@admin_only
+async def admin_risk_dashboard_no_confirm(callback: types.CallbackQuery):
+    await _render_risk_dashboard(callback, "no_confirm")
+
+
+@router.callback_query(F.data == "admin_risk_dashboard_late")
+@admin_only
+async def admin_risk_dashboard_late(callback: types.CallbackQuery):
+    await _render_risk_dashboard(callback, "late")
+
+
+@router.callback_query(F.data.startswith("risk_ping_"))
+@admin_only
+async def admin_risk_ping_one(callback: types.CallbackQuery):
+    raw = callback.data.replace("risk_ping_", "")
+    parts = raw.split("_")
+    if len(parts) != 2 or not parts[0].isdigit() or not parts[1].isdigit():
+        await callback.answer()
+        return
+    shift_id = int(parts[0])
+    worker_id = int(parts[1])
+    try:
+        await callback.bot.send_message(
+            worker_id,
+            f"🔔 Срочное напоминание: подтвердите выход/чек-ин по смене #{shift_id} в боте.",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text="Открыть смену", callback_data=f"worker_shift_{shift_id}")]]
+            ),
+        )
+        await callback.answer("Пинг отправлен исполнителю.", show_alert=True)
+    except Exception:
+        await callback.answer("Не удалось отправить пинг.", show_alert=True)
+
+
+@router.callback_query(F.data.startswith("risk_msg_"))
+@admin_only
+async def admin_risk_message_one(callback: types.CallbackQuery):
+    raw = callback.data.replace("risk_msg_", "")
+    parts = raw.split("_")
+    if len(parts) != 2 or not parts[0].isdigit() or not parts[1].isdigit():
+        await callback.answer()
+        return
+    shift_id = int(parts[0])
+    worker_id = int(parts[1])
+    assignments = get_shift_assignments(shift_id)
+    name = f"id {worker_id}"
+    for a in assignments:
+        if int(a[2]) == worker_id:
+            name = str(a[-2] or worker_id)
+            break
+    try:
+        await callback.bot.send_message(
+            worker_id,
+            "✉️ *Сообщение от администрации*\n\n"
+            f"По смене #{shift_id} нужен ваш оперативный ответ.\n"
+            "Подтвердите готовность к выходу или свяжитесь с менеджером прямо сейчас.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text="Открыть смену", callback_data=f"worker_shift_{shift_id}")]]
+            ),
+        )
+        await callback.answer(f"Сообщение отправлено: {name}", show_alert=True)
+    except Exception:
+        await callback.answer("Не удалось отправить сообщение.", show_alert=True)
 
 
 @router.callback_query(F.data == "admin_workers")

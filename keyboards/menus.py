@@ -5,12 +5,10 @@ def main_menu_keyboard(is_client: bool = False, is_worker: bool = False):
     buttons = []
     
     if is_client:
-        buttons.append([InlineKeyboardButton(text="📋 Мои проекты", callback_data="my_projects")])
-        buttons.append([InlineKeyboardButton(text="📅 Мои смены", callback_data="my_shifts")])
-        buttons.append([InlineKeyboardButton(text="✅ Мои задачи", callback_data="my_client_tasks")])
-        buttons.append([InlineKeyboardButton(text="📝 Поставить задачу", callback_data="client_add_task_pick_shift")])
-        buttons.append([InlineKeyboardButton(text="💬 Чаты смен", callback_data="client_shift_chats")])
-        buttons.append([InlineKeyboardButton(text="➕ Создать проект", callback_data="create_project")])
+        buttons.append([InlineKeyboardButton(text="📊 Обзор", callback_data="client_menu_overview")])
+        buttons.append([InlineKeyboardButton(text="🗓 Смены и статусы", callback_data="client_menu_shifts")])
+        buttons.append([InlineKeyboardButton(text="📋 Задачи", callback_data="client_menu_tasks")])
+        buttons.append([InlineKeyboardButton(text="💬 Коммуникации", callback_data="client_menu_comms")])
     elif is_worker:
         buttons.append([InlineKeyboardButton(text="📅 Мои смены", callback_data="my_shifts")])
         buttons.append([InlineKeyboardButton(text="📋 Мои задачи", callback_data="my_tasks")])
@@ -60,3 +58,43 @@ def shift_actions_keyboard(shift_id: int, is_client: bool = False):
         buttons.append([InlineKeyboardButton(text="📋 Мои задачи", callback_data=f"tasks_{shift_id}")])
     buttons.append([InlineKeyboardButton(text="🔙 Назад", callback_data="my_shifts")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def client_overview_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="📋 Мои проекты", callback_data="my_projects")],
+            [InlineKeyboardButton(text="➕ Создать проект", callback_data="create_project")],
+            [InlineKeyboardButton(text="🔙 Назад", callback_data="main_menu")],
+        ]
+    )
+
+
+def client_shifts_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="📅 Мои смены", callback_data="my_shifts")],
+            [InlineKeyboardButton(text="📡 Статус выхода на смену", callback_data="client_shift_statuses")],
+            [InlineKeyboardButton(text="🔙 Назад", callback_data="main_menu")],
+        ]
+    )
+
+
+def client_tasks_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Мои задачи", callback_data="my_client_tasks")],
+            [InlineKeyboardButton(text="📝 Поставить задачу", callback_data="client_add_task_pick_shift")],
+            [InlineKeyboardButton(text="🔙 Назад", callback_data="main_menu")],
+        ]
+    )
+
+
+def client_comms_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="💬 Чаты смен", callback_data="client_shift_chats")],
+            [InlineKeyboardButton(text="📡 Статус выхода на смену", callback_data="client_shift_statuses")],
+            [InlineKeyboardButton(text="🔙 Назад", callback_data="main_menu")],
+        ]
+    )
