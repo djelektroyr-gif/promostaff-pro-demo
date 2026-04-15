@@ -4,8 +4,13 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# Токен берётся из переменных окружения (Bothost / Timeweb)
-BOT_TOKEN = os.getenv("BOT_TOKEN")
+# Токен: BotHost/Timeweb часто дублируют одно значение в BOT_TOKEN / TELEGRAM_BOT_TOKEN / TOKEN.
+_raw_token = (
+    (os.getenv("BOT_TOKEN") or "").strip()
+    or (os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
+    or (os.getenv("TOKEN") or "").strip()
+)
+BOT_TOKEN = _raw_token or None
 if not BOT_TOKEN:
     raise ValueError("❌ BOT_TOKEN не установлен в переменных окружения!")
 
