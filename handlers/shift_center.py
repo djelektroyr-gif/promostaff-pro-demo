@@ -28,13 +28,24 @@ def _hub_keyboard(shift_id: int, *, viewer: str, project_id: int | None) -> Inli
                 callback_data=f"chat_{shift_id}",
             )
         ],
+    ]
+    if viewer == "ad":
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="\U0001f4dd \u0417\u0430\u0434\u0430\u0447\u0430 \u0438\u0441\u043f\u043e\u043b\u043d\u0438\u0442\u0435\u043b\u044f\u043c (\u0430\u0434\u043c\u0438\u043d)",
+                    callback_data=f"add_task_{shift_id}",
+                )
+            ]
+        )
+    rows.append(
         [
             InlineKeyboardButton(
                 text="\u041e\u0431\u043d\u043e\u0432\u0438\u0442\u044c",
                 callback_data=f"shift_hub_{viewer}_{shift_id}",
             )
-        ],
-    ]
+        ]
+    )
     if project_id is not None:
         rows.append(
             [

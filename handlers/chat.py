@@ -24,6 +24,8 @@ router = Router()
 
 
 def get_user_display_name(user_id: int) -> str:
+    if int(user_id) == int(ADMIN_USER_ID):
+        return "Координатор PROMOSTAFF"
     worker = get_worker(user_id)
     if worker:
         full_name = (worker[1] or "").strip() or f"id {user_id}"
@@ -39,6 +41,8 @@ def get_user_display_name(user_id: int) -> str:
 
 
 def _can_access_shift_chat(user_id: int, shift_id: int) -> bool:
+    if int(user_id) == int(ADMIN_USER_ID):
+        return True
     if get_client(user_id) and client_owns_shift(user_id, shift_id):
         return True
     if get_worker(user_id) and get_assignment(shift_id, user_id):
@@ -158,21 +162,37 @@ async def open_chat(callback: types.CallbackQuery, state: FSMContext):
     else:
         text += "_Сообщений пока нет._\n"
     text += sep
-
+    is_admin = int(user_id) == int(ADMIN_USER_ID)
+    if is_admin:
+        text += "\n_Вы вошли как координатор — можете писать в этот чат (кнопка «Написать»)._"
     is_client = get_client(user_id) is not None
-    back_callback = f"shift_detail_{shift_id}" if is_client else f"worker_shift_{shift_id}"
+    if is_admin:
+        back_callback = f"shift_hub_ad_{shift_id}"
+    elif is_client:
+        back_callback = f"shift_detail_{shift_id}"
+    else:
+        back_callback = f"worker_shift_{shift_id}"
+
+    nav_row = []
+    if is_admin:
+        nav_row = [
+            InlineKeyboardButton(text="🎯 Сводка смены", callback_data=f"shift_hub_ad_{shift_id}"),
+            InlineKeyboardButton(text="🗓 Управление сменами", callback_data="admin_shift_manage"),
+        ]
+    else:
+        nav_row = [
+            InlineKeyboardButton(text="📅 Мои смены", callback_data="my_shifts"),
+            InlineKeyboardButton(
+                text="✅ Мои задачи",
+                callback_data="my_client_tasks" if is_client else "my_tasks",
+            ),
+        ]
 
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="✏️ Написать", callback_data=f"send_chat_msg_{shift_id}")],
             [InlineKeyboardButton(text="🔄 Обновить", callback_data=f"chat_{shift_id}")],
-            [
-                InlineKeyboardButton(text="📅 Мои смены", callback_data="my_shifts"),
-                InlineKeyboardButton(
-                    text="✅ Мои задачи",
-                    callback_data="my_client_tasks" if is_client else "my_tasks",
-                ),
-            ],
+            nav_row,
             [InlineKeyboardButton(text="🔙 Назад", callback_data=back_callback)],
         ]
     )
@@ -189,7 +209,10 @@ async def prompt_chat_message(callback: types.CallbackQuery, state: FSMContext):
         return
     await state.update_data(current_chat_shift=shift_id)
     await state.set_state(ChatMessageState.waiting_for_message)
-    await callback.message.answer("✏️ Введите ваше сообщение:")
+    await callback.message.answer(
+        "✏️ Напишите сообщение для чата *одним текстом* (можно вставить ссылку). Стикеры и фото сюда не сохраняются.",
+        parse_mode="Markdown",
+    )
     await callback.answer()
 
 
@@ -203,6 +226,10 @@ async def send_chat_message(message: types.Message, state: FSMContext):
         await state.clear()
         return
     display_name = get_user_display_name(user_id)
-    save_chat_message(shift_id, user_id, display_name, message.text or "")
+    body = (message.text or message.caption or "").strip()
+    if not body:
+        await message.answer("Нужен текст сообщения (не стикер). Напишите ещё раз.")
+        return
+    save_chat_message(shift_id, user_id, display_name, body)
     await message.answer("✅ Сообщение отправлено!")
     await state.clear()

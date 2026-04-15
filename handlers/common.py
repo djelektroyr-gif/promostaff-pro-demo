@@ -4,6 +4,7 @@ from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
+from config import ADMIN_USER_ID
 from db import get_worker, get_client
 from keyboards.menus import (
     main_menu_keyboard,
@@ -61,6 +62,7 @@ async def start_cmd(message: types.Message, state: FSMContext):
 
     user_id = message.from_user.id
     payload = _start_payload(message.text or "")
+    is_admin = int(user_id) == int(ADMIN_USER_ID)
 
     # Проверяем, зарегистрирован ли пользователь
     worker = get_worker(user_id)
@@ -85,7 +87,23 @@ async def start_cmd(message: types.Message, state: FSMContext):
         await state.set_state(ClientRegistration.company_name)
         return
 
-    if worker:
+    if is_admin:
+        title = (
+            f"🔐 *Администратор*\n\n"
+            if not worker and not client
+            else f"🔐 *Администратор* / "
+            f"{'исполнитель' if worker else 'заказчик' if client else 'гость'}\n\n"
+        )
+        await message.answer(
+            title + "Выберите действие:",
+            reply_markup=main_menu_keyboard(
+                is_client=bool(client),
+                is_worker=bool(worker),
+                is_admin=True,
+            ),
+            parse_mode="Markdown",
+        )
+    elif worker:
         await message.answer(
             f"👷 *Добро пожаловать, {worker[1]}!*\n\n"
             "Вы зарегистрированы как исполнитель.\n"
@@ -132,8 +150,14 @@ async def show_main_menu(callback: types.CallbackQuery):
     user_id = callback.from_user.id
     worker = get_worker(user_id)
     client = get_client(user_id)
-    
-    if worker:
+    is_admin = int(user_id) == int(ADMIN_USER_ID)
+
+    if is_admin:
+        text = "🔐 *Главное меню*\n\nВыберите действие:"
+        markup = main_menu_keyboard(
+            is_client=bool(client), is_worker=bool(worker), is_admin=True
+        )
+    elif worker:
         text = f"👷 *{worker[1]}*\n\nВыберите действие:"
         markup = main_menu_keyboard(is_worker=True)
     elif client:
@@ -142,7 +166,7 @@ async def show_main_menu(callback: types.CallbackQuery):
     else:
         text = "🌟 *Добро пожаловать!*\n\nВыберите вашу роль:"
         markup = main_menu_keyboard()
-    
+
     await callback.message.edit_text(text, reply_markup=markup, parse_mode="Markdown")
     await callback.answer()
 
@@ -153,7 +177,9 @@ async def client_menu_overview(callback: types.CallbackQuery):
         await callback.answer("Только для заказчика.", show_alert=True)
         return
     await callback.message.edit_text(
-        "📊 *Обзор заказчика*\n\nПроекты, создание и общая навигация.",
+        "📊 *Обзор заказчика*\n\n"
+        "Здесь — ваши *проекты*. Смены создаёт администратор; вы смотрите людей, ставите задачи и читаете отчёты.\n\n"
+        "Дальше нажмите нужную кнопку внизу.",
         parse_mode="Markdown",
         reply_markup=client_overview_keyboard(),
     )
@@ -166,7 +192,10 @@ async def client_menu_shifts(callback: types.CallbackQuery):
         await callback.answer("Только для заказчика.", show_alert=True)
         return
     await callback.message.edit_text(
-        "🗓 *Смены и статусы*\n\nМониторинг смен и подтверждений исполнителей.",
+        "🗓 *Смены*\n\n"
+        "• *Мои смены* — карточки по датам.\n"
+        "• *Кто подтвердил выход* — сводка по всем сменам.\n\n"
+        "Чек-ины и чек-ауты исполнители делают сами в боте.",
         parse_mode="Markdown",
         reply_markup=client_shifts_keyboard(),
     )
@@ -179,7 +208,11 @@ async def client_menu_tasks(callback: types.CallbackQuery):
         await callback.answer("Только для заказчика.", show_alert=True)
         return
     await callback.message.edit_text(
-        "📋 *Задачи*\n\nПостановка и контроль выполнения задач по сменам.",
+        "📋 *Задачи для исполнителей*\n\n"
+        "1) Нажмите *«Новая задача для исполнителя»*.\n"
+        "2) Выберите смену → введите название и описание.\n"
+        "3) Укажите, кому на смене отправить — люди получат уведомление.\n\n"
+        "«Смотреть все задачи» — список и оценки после выполнения.",
         parse_mode="Markdown",
         reply_markup=client_tasks_keyboard(),
     )
@@ -192,7 +225,10 @@ async def client_menu_comms(callback: types.CallbackQuery):
         await callback.answer("Только для заказчика.", show_alert=True)
         return
     await callback.message.edit_text(
-        "💬 *Коммуникации*\n\nЧаты и оперативные контакты по сменам.",
+        "💬 *Связь*\n\n"
+        "• *Чаты смен* — общий чат по каждой смене.\n"
+        "• *Кто подтвердил выход* — если нужно уточнить состав.\n\n"
+        "Писать исполнителю лично можно из карточки смены (кнопка «Написать»).",
         parse_mode="Markdown",
         reply_markup=client_comms_keyboard(),
     )

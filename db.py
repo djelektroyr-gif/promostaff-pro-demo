@@ -332,6 +332,14 @@ def init_db():
         cur.execute("ALTER TABLE assignments ADD COLUMN penalty_hours REAL DEFAULT 0")
     if "billing_rounding_mode" not in assignment_cols:
         cur.execute("ALTER TABLE assignments ADD COLUMN billing_rounding_mode TEXT")
+    if "confirmed_shift_12h_reminder_sent_at" not in assignment_cols:
+        cur.execute(
+            "ALTER TABLE assignments ADD COLUMN confirmed_shift_12h_reminder_sent_at TIMESTAMP"
+        )
+    if "confirmed_shift_3h_reminder_sent_at" not in assignment_cols:
+        cur.execute(
+            "ALTER TABLE assignments ADD COLUMN confirmed_shift_3h_reminder_sent_at TIMESTAMP"
+        )
 
     cur.execute(
         """
@@ -1480,51 +1488,59 @@ def _late_checkin_penalty_hours(checkin_time: datetime, shift_date: str, start_t
     return 0.0
 
 
-def do_checkout(shift_id: int, worker_id: int, photo_url: str | None = None):
+def do_checkout(shift_id: int, worker_id: int, photo_url: str | None = None) -> bool:
     conn = db_connect()
     cur = conn.cursor()
     cur.execute(
-        "SELECT checkin_time FROM assignments WHERE shift_id = ? AND worker_id = ?",
+        """
+        SELECT checkin_time FROM assignments
+        WHERE shift_id = ? AND worker_id = ? AND status = 'checked_in'
+        """,
         (shift_id, worker_id),
     )
     row = cur.fetchone()
-    if row and row[0]:
-        checkin_time = _parse_sqlite_ts(row[0])
-        now = now_local_naive()
-        hours_actual = max(0.0, (now - checkin_time).total_seconds() / 3600.0)
+    if not row or not row[0]:
+        conn.close()
+        return False
+    checkin_time = _parse_sqlite_ts(row[0])
+    now = now_local_naive()
+    hours_actual = max(0.0, (now - checkin_time).total_seconds() / 3600.0)
 
-        cur.execute("SELECT shift_date, start_time, end_time, rate FROM shifts WHERE id = ?", (shift_id,))
-        shift_row = cur.fetchone()
-        if shift_row:
-            shift_date, start_time, end_time, rate = shift_row
-        else:
-            shift_date, start_time, end_time, rate = "", "00:00", "00:00", 500
+    cur.execute("SELECT shift_date, start_time, end_time, rate FROM shifts WHERE id = ?", (shift_id,))
+    shift_row = cur.fetchone()
+    if shift_row:
+        shift_date, start_time, end_time, rate = shift_row
+    else:
+        shift_date, start_time, end_time, rate = "", "00:00", "00:00", 500
 
-        penalty_h = _late_checkin_penalty_hours(checkin_time, str(shift_date), str(start_time), str(end_time))
-        billed_before_round = max(0.0, hours_actual - penalty_h)
-        billed_h = _round_hours(billed_before_round, BILLING_ROUNDING_MODE)
-        payment = billed_h * float(rate)
+    penalty_h = _late_checkin_penalty_hours(checkin_time, str(shift_date), str(start_time), str(end_time))
+    billed_before_round = max(0.0, hours_actual - penalty_h)
+    billed_h = _round_hours(billed_before_round, BILLING_ROUNDING_MODE)
+    payment = billed_h * float(rate)
+    ts_out = now_local_naive()
 
-        cur.execute(
-            """
-            UPDATE assignments SET status = 'checked_out', checkout_time = CURRENT_TIMESTAMP,
-            checkout_photo = ?, hours_worked = ?, billed_hours = ?, penalty_hours = ?, billing_rounding_mode = ?, payment = ?
-            WHERE shift_id = ? AND worker_id = ?
-        """,
-            (
-                photo_url,
-                hours_actual,
-                billed_h,
-                penalty_h,
-                BILLING_ROUNDING_MODE,
-                payment,
-                shift_id,
-                worker_id,
-            ),
-        )
-
+    cur.execute(
+        """
+        UPDATE assignments SET status = 'checked_out', checkout_time = ?,
+        checkout_photo = ?, hours_worked = ?, billed_hours = ?, penalty_hours = ?, billing_rounding_mode = ?, payment = ?
+        WHERE shift_id = ? AND worker_id = ? AND status = 'checked_in'
+    """,
+        (
+            ts_out,
+            photo_url,
+            hours_actual,
+            billed_h,
+            penalty_h,
+            BILLING_ROUNDING_MODE,
+            payment,
+            shift_id,
+            worker_id,
+        ),
+    )
+    ok = cur.rowcount > 0
     conn.commit()
     conn.close()
+    return ok
 
 
 def get_shift_with_owner(shift_id: int):
@@ -1558,6 +1574,7 @@ def list_assignments_for_scheduler() -> list:
             a.escalation_11h_sent_at, a.escalation_1h_sent_at, a.checkin_30m_sent_at, a.checkin_15m_sent_at, a.checkout_30m_sent_at,
             a.forgot_checkout_sent_at, a.late_checkin_notified_at, a.no_confirm_flagged_at, a.no_checkin_start_notified_at,
             a.extension_request_minutes, a.extension_request_status,
+            a.confirmed_shift_12h_reminder_sent_at, a.confirmed_shift_3h_reminder_sent_at,
             s.shift_date, s.start_time, s.end_time, s.location, s.status,
             p.client_id,
             w.full_name
@@ -1730,6 +1747,8 @@ def mark_assignment_event(assignment_id: int, field: str) -> None:
         "late_checkin_notified_at",
         "no_confirm_flagged_at",
         "no_checkin_start_notified_at",
+        "confirmed_shift_12h_reminder_sent_at",
+        "confirmed_shift_3h_reminder_sent_at",
     }
     if field not in allowed:
         return
@@ -1758,6 +1777,8 @@ def mark_assignment_event_by_shift_worker(shift_id: int, worker_id: int, field: 
         "late_checkin_notified_at",
         "no_confirm_flagged_at",
         "no_checkin_start_notified_at",
+        "confirmed_shift_12h_reminder_sent_at",
+        "confirmed_shift_3h_reminder_sent_at",
     }
     if field not in allowed:
         return
@@ -2076,9 +2097,23 @@ def get_shift_report(shift_id: int) -> dict:
     cur.execute("SELECT * FROM shifts WHERE id = ?", (shift_id,))
     shift = cur.fetchone()
 
+    # Явный список колонок — порядок совпадает с индексами в services/shift_hub (не полагаемся на a.* в PG).
     cur.execute(
         """
-        SELECT a.*, w.full_name, w.phone FROM assignments a
+        SELECT
+            a.id, a.shift_id, a.worker_id, a.status, a.confirmed_at,
+            a.checkin_time, a.checkin_photo, a.checkout_time, a.checkout_photo,
+            a.hours_worked, a.payment,
+            a.assigned_notify_sent_at, a.reminder_12h_sent_at, a.reminder_12h_repeat_last_at,
+            a.reminder_3h_sent_at, a.escalation_11h_sent_at, a.escalation_1h_sent_at,
+            a.checkin_30m_sent_at, a.checkin_15m_sent_at, a.checkout_30m_sent_at,
+            a.forgot_checkout_sent_at, a.late_checkin_notified_at, a.no_confirm_flagged_at,
+            a.no_checkin_start_notified_at, a.extension_request_minutes, a.extension_request_status,
+            a.extension_requested_at, a.extension_resolved_at, a.checkin_lat, a.checkin_lng,
+            a.checkin_geo_ok, a.billed_hours, a.penalty_hours, a.billing_rounding_mode,
+            a.confirmed_shift_12h_reminder_sent_at, a.confirmed_shift_3h_reminder_sent_at,
+            w.full_name, w.phone
+        FROM assignments a
         JOIN workers w ON a.worker_id = w.user_id
         WHERE a.shift_id = ?
     """,

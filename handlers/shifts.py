@@ -561,16 +561,20 @@ async def shift_detail(callback: types.CallbackQuery):
         checkout = str(a[7] or "—")
         text += f"• {name}: {status_text}\n  чек-ин: {checkin}\n  чек-аут: {checkout}\n"
 
+    text += (
+        "\n_💡 Задание людям: кнопка *«Поставить задачу исполнителям»* — бот спросит название, описание и кого уведомить._\n"
+    )
+
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="🎯 Вся смена здесь", callback_data=f"shift_hub_cl_{shift_id}")],
-            [InlineKeyboardButton(text="📋 Поставить задачу", callback_data=f"add_task_{shift_id}")],
+            [InlineKeyboardButton(text="📝 Поставить задачу исполнителям", callback_data=f"add_task_{shift_id}")],
             [InlineKeyboardButton(text="✉️ Написать исполнителю", callback_data=f"msg_worker_pick_{shift_id}")],
             [InlineKeyboardButton(text="💬 Чат смены", callback_data=f"chat_{shift_id}")],
             [InlineKeyboardButton(text="📊 Отчёт", callback_data=f"report_{shift_id}")],
             [
                 InlineKeyboardButton(text="📋 Проекты", callback_data="my_projects"),
-                InlineKeyboardButton(text="✅ Мои задачи", callback_data="my_client_tasks"),
+                InlineKeyboardButton(text="✅ Все задачи", callback_data="my_client_tasks"),
             ],
             [InlineKeyboardButton(text="🔙 Назад", callback_data="my_shifts")],
         ]
@@ -884,10 +888,18 @@ async def checkin_photo_wrong_payload(message: types.Message):
 @router.callback_query(F.data.startswith("checkout_"))
 async def checkout_start(callback: types.CallbackQuery, state: FSMContext):
     shift_id = int(callback.data.replace("checkout_", ""))
+    assignment = get_assignment(shift_id, callback.from_user.id)
+    if not assignment or assignment[3] != "checked_in":
+        await callback.answer("Чек-аут доступен после чек-ина на смене.", show_alert=True)
+        return
     await state.update_data(checkout_shift_id=shift_id)
     await state.set_state(CheckoutFlow.geo)
     await callback.message.edit_text(
-        "📍 *ЧЕК-АУТ*\n\nОтправьте финальную геолокацию.\n\n*Скрепка 📎 → Локация*",
+        "📍 *ЧЕК-АУТ*\n\n"
+        "По шагам:\n"
+        "1) Отправьте *геолокацию* (скрепка 📎 → Локация)\n"
+        "2) Затем *селфи фото* (не как файл)\n\n"
+        "⚠️ Одним сообщением чек-аут отправить нельзя.",
         parse_mode="Markdown",
     )
     await callback.answer()
@@ -898,6 +910,11 @@ async def checkout_geo_received(message: types.Message, state: FSMContext):
     data = await state.get_data()
     shift_id = data.get("checkout_shift_id")
     shift = get_shift(int(shift_id)) if shift_id else None
+    assignment = get_assignment(int(shift_id), message.from_user.id) if shift_id else None
+    if not shift or not assignment or assignment[3] != "checked_in":
+        await message.answer("❌ Чек-аут недоступен. Откройте смену из «Мои смены».")
+        await state.clear()
+        return
     exp_lat, exp_lng, radius = _shift_geo_limits(shift)
     if exp_lat is not None and exp_lng is not None:
         dist = _distance_m(
@@ -925,12 +942,27 @@ async def checkout_geo_received(message: types.Message, state: FSMContext):
         parse_mode="Markdown",
     )
 
+
+@router.message(CheckoutFlow.geo)
+async def checkout_geo_wrong_payload(message: types.Message):
+    await message.answer(
+        "⚠️ Нужна *геолокация* для чек-аута.\nСкрепка 📎 → Локация.",
+        parse_mode="Markdown",
+    )
+
+
 @router.message(F.photo, CheckoutFlow.photo)
 async def checkout_photo_received(message: types.Message, state: FSMContext):
     photo_id = message.photo[-1].file_id
     data = await state.get_data()
     shift_id = data["checkout_shift_id"]
-    do_checkout(shift_id, message.from_user.id, photo_id)
+    ok = do_checkout(int(shift_id), message.from_user.id, photo_id)
+    if not ok:
+        await message.answer(
+            "❌ Чек-аут не сохранился. Убедитесь, что вы на смене (статус «На смене») и открыли чек-аут из карточки."
+        )
+        await state.clear()
+        return
     await message.answer("✅ *Смена завершена!* Спасибо за работу!", parse_mode="Markdown")
     await state.clear()
 
@@ -942,10 +974,21 @@ async def checkout_skip_photo(message: types.Message, state: FSMContext):
     )
 
 
+@router.message(CheckoutFlow.photo, ~F.photo)
+async def checkout_photo_wrong_type(message: types.Message):
+    await message.answer(
+        "⚠️ Отправьте изображение именно как *фото* (камера), не как файл.",
+        parse_mode="Markdown",
+    )
+
+
 @router.callback_query(F.data.startswith("forgot_close_"))
 async def forgot_close_shift(callback: types.CallbackQuery):
     shift_id = int(callback.data.replace("forgot_close_", ""))
-    do_checkout(shift_id, callback.from_user.id, None)
+    ok = do_checkout(shift_id, callback.from_user.id, None)
+    if not ok:
+        await callback.answer("Не удалось закрыть смену (нет чек-ина или уже закрыта).", show_alert=True)
+        return
     await callback.message.edit_text("✅ Смена закрыта. Спасибо!")
     await callback.answer()
 
@@ -1023,9 +1066,21 @@ async def admin_extension_reject(callback: types.CallbackQuery):
     worker_id = int(worker_raw)
     minutes = int(min_raw)
     resolve_extension_request(shift_id, worker_id, approved=False)
-    do_checkout(shift_id, worker_id, None)
-    await callback.bot.send_message(worker_id, f"❌ Продление на {minutes} минут отклонено. Смена #{shift_id} закрыта.")
-    await callback.message.edit_text(f"✅ Продление по смене #{shift_id} отклонено, смена закрыта.")
+    closed = do_checkout(shift_id, worker_id, None)
+    if closed:
+        await callback.bot.send_message(
+            worker_id,
+            f"❌ Продление на {minutes} минут отклонено. Смена #{shift_id} закрыта.",
+        )
+        await callback.message.edit_text(f"✅ Продление отклонено, смена #{shift_id} закрыта.")
+    else:
+        await callback.bot.send_message(
+            worker_id,
+            f"❌ Продление на {minutes} минут отклонено. Закройте смену #{shift_id} вручную (чек-аут в карточке).",
+        )
+        await callback.message.edit_text(
+            f"Продление отклонено. Автозакрытие не удалось — проверьте статус смены #{shift_id}."
+        )
     await callback.answer()
 
 

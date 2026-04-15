@@ -3,6 +3,7 @@ from aiogram import Router, F, types
 from aiogram.fsm.context import FSMContext
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
+from config import ADMIN_USER_ID
 from db import (
     create_task,
     get_worker_tasks,
@@ -19,6 +20,7 @@ from db import (
     assignment_join_worker_name,
     format_date_ru,
     client_owns_task,
+    client_owns_shift,
     set_task_client_rating,
 )
 from states import TaskCreation, TaskCompletion
@@ -57,7 +59,7 @@ def _multi_pick_keyboard(assignments, picked: list[int]) -> InlineKeyboardMarkup
     rows.append(
         [
             InlineKeyboardButton(
-                text=f"\u0421\u043e\u0437\u0434\u0430\u0442\u044c \u0434\u043b\u044f \u0432\u044b\u0431\u0440\u0430\u043d\u043d\u044b\u0445 ({len(picked)})",
+                text=f"✅ Готово: создать ({len(picked)} чел.)",
                 callback_data="assign_multi_done",
             )
         ]
@@ -65,7 +67,7 @@ def _multi_pick_keyboard(assignments, picked: list[int]) -> InlineKeyboardMarkup
     rows.append(
         [
             InlineKeyboardButton(
-                text="\u041e\u0442\u043c\u0435\u043d\u0430",
+                text="❌ Отмена",
                 callback_data="assign_multi_cancel",
             )
         ]
@@ -95,7 +97,13 @@ async def _notify_workers_new_tasks(
                                 text="\U0001f4dd Отчитаться",
                                 callback_data=f"complete_task_{task_id}",
                             )
-                        ]
+                        ],
+                        [
+                            InlineKeyboardButton(
+                                text="Открыть смену",
+                                callback_data=f"worker_shift_{shift_id}",
+                            )
+                        ],
                     ]
                 ),
             )
@@ -146,9 +154,12 @@ async def client_add_task_pick_shift(callback: types.CallbackQuery):
     shifts = list_shifts_for_client(user_id)
     if not shifts:
         await callback.message.edit_text(
-            "❌ У вас нет смен. Сначала создайте смену через администратора.",
+            "❌ *Пока нет ваших смен*\n\n"
+            "Смену создаёт *администратор* PROMOSTAFF. Как только смена появится — "
+            "зайдите снова: «Главное меню» → «Задачи» → «Новая задача для исполнителя».",
+            parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup(
-                inline_keyboard=[[InlineKeyboardButton(text="🔙 Назад", callback_data="main_menu")]]
+                inline_keyboard=[[InlineKeyboardButton(text="🔙 Главное меню", callback_data="main_menu")]]
             ),
         )
         await callback.answer()
@@ -158,7 +169,13 @@ async def client_add_task_pick_shift(callback: types.CallbackQuery):
         rows.append([InlineKeyboardButton(text=f"📅 #{s[0]} {format_date_ru(s[1])} {s[2]}-{s[3]}", callback_data=f"add_task_{s[0]}")])
     rows.append([InlineKeyboardButton(text="🔙 Назад", callback_data="main_menu")])
     await callback.message.edit_text(
-        "📝 Выберите смену, куда добавить задачу:",
+        "📝 *Новая задача — шаг 1 из 4*\n\n"
+        "Нажмите на *смену* ниже (дата и время). Дальше бот попросит:\n"
+        "2) короткое название задачи;\n"
+        "3) описание (можно прочерк `-`);\n"
+        "4) кому из исполнителей на смене её дать.\n\n"
+        "_На смену должны быть уже назначены люди — иначе задачу некому отправить._",
+        parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
     )
     await callback.answer()
@@ -261,13 +278,22 @@ async def _render_client_tasks(callback: types.CallbackQuery, flt: str) -> None:
         tasks = tasks_all
     if not tasks:
         await callback.message.edit_text(
-            "✅ По выбранному фильтру задач нет.",
+            "✅ По этому фильтру задач нет.\n\n"
+            "Чтобы *поставить новую*: меню «Задачи» → кнопка "
+            "«Новая задача для исполнителя» → выберите смену.",
+            parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup(
                 inline_keyboard=[
                     [
                         InlineKeyboardButton(text="Все", callback_data="my_client_tasks_all"),
                         InlineKeyboardButton(text="Открытые", callback_data="my_client_tasks_open"),
                         InlineKeyboardButton(text="Выполненные", callback_data="my_client_tasks_done"),
+                    ],
+                    [
+                        InlineKeyboardButton(
+                            text="📝 Поставить новую задачу",
+                            callback_data="client_add_task_pick_shift",
+                        )
                     ],
                     [InlineKeyboardButton(text="🔙 Назад", callback_data="main_menu")],
                 ]
@@ -279,6 +305,7 @@ async def _render_client_tasks(callback: types.CallbackQuery, flt: str) -> None:
     done_cnt = len(tasks_all) - open_cnt
     text = (
         "✅ *Мои задачи (заказчик)*\n\n"
+        "Новая задача: меню *«Задачи»* → *«Новая задача для исполнителя»*.\n\n"
         f"Всего: *{len(tasks_all)}* | Открыто: *{open_cnt}* | Выполнено: *{done_cnt}*\n"
         f"Фильтр: *{ {'all':'Все','open':'Открытые','done':'Выполненные'}[flt] }*\n\n"
     )
@@ -312,6 +339,12 @@ async def _render_client_tasks(callback: types.CallbackQuery, flt: str) -> None:
         rows.append([InlineKeyboardButton(text=f"📅 Смена #{sid}", callback_data=f"shift_detail_{sid}")])
     rows.extend(
         [
+            [
+                InlineKeyboardButton(
+                    text="📝 Новая задача исполнителю",
+                    callback_data="client_add_task_pick_shift",
+                )
+            ],
             [
                 InlineKeyboardButton(text="Все", callback_data="my_client_tasks_all"),
                 InlineKeyboardButton(text="Открытые", callback_data="my_client_tasks_open"),
@@ -374,8 +407,23 @@ async def my_tasks_hub(callback: types.CallbackQuery):
 @router.callback_query(F.data.startswith("add_task_"))
 async def add_task_start(callback: types.CallbackQuery, state: FSMContext):
     shift_id = int(callback.data.replace("add_task_", ""))
+    uid = callback.from_user.id
+    is_admin = int(uid) == int(ADMIN_USER_ID)
+    if not is_admin and (not get_client(uid) or not client_owns_shift(uid, shift_id)):
+        await callback.answer(
+            "Задачу может поставить заказчик этой смены или администратор. Откройте смену из «Мои смены» или сводку админа.",
+            show_alert=True,
+        )
+        return
     await state.update_data(task_shift_id=shift_id)
-    await callback.message.edit_text("📋 *НОВАЯ ЗАДАЧА*\n\nВведите название задачи:", parse_mode="Markdown")
+    intro = (
+        "📋 *Новая задача — шаг 2 из 4*\n\n"
+        "Напишите *одним сообщением* короткое название, как в списке дел.\n"
+        "Пример: `Разложить флаеры у входа`"
+    )
+    if is_admin:
+        intro += "\n\n_Вы администратор — задачу увидят выбранные исполнители, как если бы её поставил заказчик._"
+    await callback.message.edit_text(intro, parse_mode="Markdown")
     await state.set_state(TaskCreation.title)
     await callback.answer()
 
@@ -383,7 +431,11 @@ async def add_task_start(callback: types.CallbackQuery, state: FSMContext):
 @router.message(TaskCreation.title)
 async def task_title_received(message: types.Message, state: FSMContext):
     await state.update_data(task_title=message.text.strip())
-    await message.answer("Введите описание задачи (или `-`):")
+    await message.answer(
+        "📋 *Шаг 3 из 4* — описание\n\n"
+        "Напишите подробности *одним сообщением*. Если подробностей нет — отправьте один символ: `-`",
+        parse_mode="Markdown",
+    )
     await state.set_state(TaskCreation.description)
 
 
@@ -399,18 +451,24 @@ async def task_description_received(message: types.Message, state: FSMContext):
     assignments = get_shift_assignments(shift_id)
 
     if not assignments:
-        await message.answer("❌ На эту смену ещё не назначены исполнители.")
+        await message.answer(
+            "❌ На эту смену ещё *не назначены исполнители*. Попросите администратора назначить людей, "
+            "затем снова: «Новая задача для исполнителя».",
+            parse_mode="Markdown",
+        )
         await state.clear()
         return
 
     keyboard_rows = [
-        [InlineKeyboardButton(text="Всем на смене", callback_data="assign_mode_all")],
-        [InlineKeyboardButton(text="Несколько человек", callback_data="assign_mode_multi")],
-        [InlineKeyboardButton(text="Один исполнитель", callback_data="assign_mode_one")],
-        [InlineKeyboardButton(text="Без исполнителя", callback_data="assign_task_skip")],
+        [InlineKeyboardButton(text="✅ Всем на смене сразу", callback_data="assign_mode_all")],
+        [InlineKeyboardButton(text="👥 Выбрать нескольких", callback_data="assign_mode_multi")],
+        [InlineKeyboardButton(text="👤 Одному человеку", callback_data="assign_mode_one")],
+        [InlineKeyboardButton(text="📌 Пока без исполнителя (черновик)", callback_data="assign_task_skip")],
     ]
     await message.answer(
-        "Кому поставить задачу? Можно всем сразу, нескольким, одному или пока без исполнителя.",
+        "📋 *Шаг 4 из 4* — кому отправить задачу\n\n"
+        "Выберите *одну кнопку* ниже. Исполнители сразу получат уведомление в Telegram.",
+        parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard_rows),
     )
     await state.set_state(TaskCreation.choose_assignment)
@@ -442,10 +500,14 @@ async def assign_mode_all_handler(callback: types.CallbackQuery, state: FSMConte
         worker_task_pairs=pairs,
     )
     await callback.message.edit_text(
-        f"Создано задач: {len(pairs)} — по одной каждому на смене.\n\n📋 {title}",
+        f"✅ *Готово!* Создано задач: *{len(pairs)}* (каждому на смене).\n\n📋 {title}\n\n"
+        "Исполнители получили уведомление. Вы можете вернуться в карточку смены или поставить ещё одну задачу.",
+        parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(
             inline_keyboard=[
-                [InlineKeyboardButton(text="К смене", callback_data=f"shift_detail_{shift_id}")]
+                [InlineKeyboardButton(text="📅 Открыть эту смену", callback_data=f"shift_detail_{shift_id}")],
+                [InlineKeyboardButton(text="📝 Ещё одна задача", callback_data="client_add_task_pick_shift")],
+                [InlineKeyboardButton(text="🏠 Главное меню", callback_data="main_menu")],
             ]
         ),
     )
@@ -465,7 +527,8 @@ async def assign_mode_one_handler(callback: types.CallbackQuery, state: FSMConte
         keyboard_rows.append([InlineKeyboardButton(text=name[:40], callback_data=f"assign_task_{wid}")])
     keyboard_rows.append([InlineKeyboardButton(text="Без исполнителя", callback_data="assign_task_skip")])
     await callback.message.edit_text(
-        "Выберите одного исполнителя:",
+        "👤 *Кому одному?*\n\nНажмите на фамилию исполнителя. «Без исполнителя» — если пока только фиксируете задачу в системе.",
+        parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard_rows),
     )
     await state.set_state(TaskCreation.assigned_to)
@@ -479,8 +542,10 @@ async def assign_mode_multi_handler(callback: types.CallbackQuery, state: FSMCon
     assignments = get_shift_assignments(shift_id)
     await state.update_data(task_picked=[])
     await callback.message.edit_text(
-        "Отметьте исполнителей (нажмите ещё раз, чтобы снять отметку). "
-        "Затем нажмите «Создать для выбранных».",
+        "👥 *Несколько исполнителей*\n\n"
+        "Нажимайте по строкам — галочка ✓ появится у выбранных. "
+        "Потом внизу нажмите *«Готово: создать задачи»*.",
+        parse_mode="Markdown",
         reply_markup=_multi_pick_keyboard(assignments, []),
     )
     await state.set_state(TaskCreation.pick_workers)
@@ -495,10 +560,13 @@ async def assign_skip_from_choice(callback: types.CallbackQuery, state: FSMConte
     description = data.get("task_description", "")
     create_task(shift_id, title, description, None)
     await callback.message.edit_text(
-        f"Задача создана без исполнителя.\n\n📋 {title}",
+        f"📌 Задача сохранена *без исполнителя* (никому не ушло уведомление).\n\n📋 {title}\n\n"
+        "Позже можно создать задачу заново и назначить людей.",
+        parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(
             inline_keyboard=[
-                [InlineKeyboardButton(text="К смене", callback_data=f"shift_detail_{shift_id}")]
+                [InlineKeyboardButton(text="📅 К смене", callback_data=f"shift_detail_{shift_id}")],
+                [InlineKeyboardButton(text="📝 Новая задача", callback_data="client_add_task_pick_shift")],
             ]
         ),
     )
@@ -547,10 +615,13 @@ async def assign_multi_done(callback: types.CallbackQuery, state: FSMContext):
         worker_task_pairs=pairs,
     )
     await callback.message.edit_text(
-        f"Создано задач: {len(pairs)}.\n\n📋 {title}",
+        f"✅ *Готово!* Создано задач: *{len(pairs)}*.\n\n📋 {title}",
+        parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(
             inline_keyboard=[
-                [InlineKeyboardButton(text="К смене", callback_data=f"shift_detail_{shift_id}")]
+                [InlineKeyboardButton(text="📅 Открыть смену", callback_data=f"shift_detail_{shift_id}")],
+                [InlineKeyboardButton(text="📝 Ещё задача", callback_data="client_add_task_pick_shift")],
+                [InlineKeyboardButton(text="🏠 Меню", callback_data="main_menu")],
             ]
         ),
     )
@@ -585,10 +656,13 @@ async def task_assign_received(callback: types.CallbackQuery, state: FSMContext)
     task_id = create_task(shift_id, title, description, worker_id)
 
     await callback.message.edit_text(
-        f"✅ Задача создана!\n\n📋 {title}",
+        f"✅ *Задача создана!*\n\n📋 {title}",
+        parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(
             inline_keyboard=[
-                [InlineKeyboardButton(text="К смене", callback_data=f"shift_detail_{shift_id}")]
+                [InlineKeyboardButton(text="📅 К смене", callback_data=f"shift_detail_{shift_id}")],
+                [InlineKeyboardButton(text="📝 Ещё задача", callback_data="client_add_task_pick_shift")],
+                [InlineKeyboardButton(text="🏠 Меню", callback_data="main_menu")],
             ]
         ),
     )

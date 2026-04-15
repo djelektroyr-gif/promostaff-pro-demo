@@ -22,6 +22,14 @@ from services.time_utils import now_local_naive, shift_start_end_local_naive
 logger = logging.getLogger(__name__)
 
 
+def _kb_open_shift(shift_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Открыть смену", callback_data=f"worker_shift_{shift_id}")]
+        ]
+    )
+
+
 def _normalize_time_str(value: str) -> str:
     s = (value or "").strip()
     if len(s) >= 8 and s.count(":") >= 2:
@@ -70,6 +78,8 @@ async def run_notifications_once(bot: Bot) -> None:
                 no_checkin_start_notified_at,
                 _extension_request_minutes,
                 _extension_request_status,
+                confirmed_shift_12h_reminder_sent_at,
+                confirmed_shift_3h_reminder_sent_at,
                 shift_date,
                 start_time,
                 end_time,
@@ -94,6 +104,7 @@ async def run_notifications_once(bot: Bot) -> None:
                     f"Локация: {location}\n\n"
                     "Подтвердите выход в карточке смены.",
                     parse_mode="Markdown",
+                    reply_markup=_kb_open_shift(int(shift_id)),
                     context=f"assigned:{assignment_id}",
                 )
                 mark_assignment_event(int(assignment_id), "assigned_notify_sent_at")
@@ -105,6 +116,7 @@ async def run_notifications_once(bot: Bot) -> None:
                         bot,
                         int(worker_id),
                         f"⏰ До смены #{shift_id} ~12 часов. Подтвердите выход в боте.",
+                        reply_markup=_kb_open_shift(int(shift_id)),
                         context=f"rem12:{assignment_id}",
                     )
                     mark_assignment_event(int(assignment_id), "reminder_12h_sent_at")
@@ -123,6 +135,7 @@ async def run_notifications_once(bot: Bot) -> None:
                         bot,
                         int(worker_id),
                         f"⏰ Напоминание: смена #{shift_id} через ~{int(to_start // 3600)}ч {int((to_start % 3600) // 60)}м. Подтвердите выход.",
+                        reply_markup=_kb_open_shift(int(shift_id)),
                         context=f"rem12_repeat:{assignment_id}",
                     )
                     mark_assignment_event(int(assignment_id), "reminder_12h_repeat_last_at")
@@ -141,6 +154,7 @@ async def run_notifications_once(bot: Bot) -> None:
                         bot,
                         int(worker_id),
                         f"⏰ До смены #{shift_id} ~3 часа. Срочно подтвердите выход.",
+                        reply_markup=_kb_open_shift(int(shift_id)),
                         context=f"rem3:{assignment_id}",
                     )
                     mark_assignment_event(int(assignment_id), "reminder_3h_sent_at")
@@ -156,16 +170,60 @@ async def run_notifications_once(bot: Bot) -> None:
                         bot,
                         int(worker_id),
                         f"⚠️ До старта смены #{shift_id} меньше часа. Подтвердите выход немедленно.",
+                        reply_markup=_kb_open_shift(int(shift_id)),
                         context=f"escal1_worker:{assignment_id}",
                     )
                     mark_assignment_event(int(assignment_id), "escalation_1h_sent_at")
+
+            # Напоминания о смене для уже подтвердивших (не путать с «подтвердите выход» для pending).
+            # Окно «~12 ч»: строго больше 3 ч до старта — иначе сработает только блок «~3 ч».
+            if (
+                status == "confirmed"
+                and confirmed_shift_12h_reminder_sent_at is None
+                and 3 * 3600 < to_start <= 12 * 3600
+            ):
+                h, m = int(to_start // 3600), int((to_start % 3600) // 60)
+                await send_message_with_retry(
+                    bot,
+                    int(worker_id),
+                    "📅 *Напоминание о смене*\n\n"
+                    f"До старта смены *#{shift_id}* осталось около *{h}ч {m}м*.\n"
+                    f"📆 {format_date_ru(str(shift_date))} {start_time}–{end_time}\n"
+                    f"📍 {location}\n\n"
+                    "Вы уже подтвердили выход. За *30 минут* до начала бот напомнит про *чек-ин* (геолокация и селфи).",
+                    parse_mode="Markdown",
+                    reply_markup=_kb_open_shift(int(shift_id)),
+                    context=f"conf_shift_12h:{assignment_id}",
+                )
+                mark_assignment_event(int(assignment_id), "confirmed_shift_12h_reminder_sent_at")
+
+            if (
+                status == "confirmed"
+                and confirmed_shift_3h_reminder_sent_at is None
+                and 0 < to_start <= 3 * 3600
+            ):
+                h, m = int(to_start // 3600), int((to_start % 3600) // 60)
+                await send_message_with_retry(
+                    bot,
+                    int(worker_id),
+                    "📅 *Напоминание о смене*\n\n"
+                    f"До старта смены *#{shift_id}* осталось около *{h}ч {m}м*.\n"
+                    f"📆 {format_date_ru(str(shift_date))} {start_time}–{end_time}\n"
+                    f"📍 {location}\n\n"
+                    "Скоро откроется чек-ин: *геолокация*, затем *фото*. Откройте смену в боте и следуйте шагам.",
+                    parse_mode="Markdown",
+                    reply_markup=_kb_open_shift(int(shift_id)),
+                    context=f"conf_shift_3h:{assignment_id}",
+                )
+                mark_assignment_event(int(assignment_id), "confirmed_shift_3h_reminder_sent_at")
 
             # Напоминание о чек-ине за 30 минут.
             if status == "confirmed" and checkin_30m_sent_at is None and 0 < to_start <= 1800:
                 await send_message_with_retry(
                     bot,
                     int(worker_id),
-                    f"📍 До старта смены #{shift_id} 30 минут. Пришлите геолокацию и селфи на площадке (чек-ин).",
+                    f"📍 До старта смены #{shift_id} 30 минут. Откройте смену → «Чек-ин»: сначала геолокация, затем селфи.",
+                    reply_markup=_kb_open_shift(int(shift_id)),
                     context=f"checkin30:{assignment_id}",
                 )
                 mark_assignment_event(int(assignment_id), "checkin_30m_sent_at")
@@ -173,7 +231,8 @@ async def run_notifications_once(bot: Bot) -> None:
                 await send_message_with_retry(
                     bot,
                     int(worker_id),
-                    f"⚠️ До старта смены #{shift_id} 15 минут. Если вы на площадке — выполните чек-ин сейчас.",
+                    f"⚠️ До старта смены #{shift_id} 15 минут. Выполните чек-ин (гео, затем фото).",
+                    reply_markup=_kb_open_shift(int(shift_id)),
                     context=f"checkin15:{assignment_id}",
                 )
                 mark_assignment_event(int(assignment_id), "checkin_15m_sent_at")
@@ -189,6 +248,7 @@ async def run_notifications_once(bot: Bot) -> None:
                     bot,
                     int(worker_id),
                     f"⚠️ Смена #{shift_id} уже началась, а чек-ин не выполнен. Это фиксируется как опоздание.",
+                    reply_markup=_kb_open_shift(int(shift_id)),
                     context=f"nocheckin_worker:{assignment_id}",
                 )
                 mark_assignment_event(int(assignment_id), "no_checkin_start_notified_at")
@@ -200,7 +260,8 @@ async def run_notifications_once(bot: Bot) -> None:
                 await send_message_with_retry(
                     bot,
                     int(worker_id),
-                    f"📸 До завершения смены #{shift_id} 30 минут. Не забудьте чек-аут.",
+                    f"📸 До завершения смены #{shift_id} 30 минут. Чек-аут: геолокация, затем селфи.",
+                    reply_markup=_kb_open_shift(int(shift_id)),
                     context=f"checkout30:{assignment_id}",
                 )
                 mark_assignment_event(int(assignment_id), "checkout_30m_sent_at")

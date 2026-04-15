@@ -3,6 +3,7 @@ from aiogram import Router, F, types
 from aiogram.fsm.context import FSMContext
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 
+from config import ADMIN_USER_ID
 from db import save_worker, save_client
 from keyboards.menus import main_menu_keyboard, professions_keyboard, confirm_keyboard
 from states import WorkerRegistration, ClientRegistration
@@ -92,9 +93,13 @@ async def confirm_worker_reg(callback: types.CallbackQuery, state: FSMContext):
     )
     await state.clear()
     
+    uid = callback.from_user.id
     await callback.message.answer(
         f"👷 *{data['full_name']}*\n\nВыберите действие:",
-        reply_markup=main_menu_keyboard(is_worker=True),
+        reply_markup=main_menu_keyboard(
+            is_worker=True,
+            is_admin=int(uid) == int(ADMIN_USER_ID),
+        ),
         parse_mode="Markdown"
     )
     await callback.answer()
@@ -153,9 +158,13 @@ async def process_client_phone(message: types.Message, state: FSMContext):
     )
     await state.clear()
     
+    uid = message.from_user.id
     await message.answer(
         f"🏢 *{data['contact_name']} ({data['company_name']})*\n\nВыберите действие:",
-        reply_markup=main_menu_keyboard(is_client=True),
+        reply_markup=main_menu_keyboard(
+            is_client=True,
+            is_admin=int(uid) == int(ADMIN_USER_ID),
+        ),
         parse_mode="Markdown"
     )
 
@@ -176,8 +185,12 @@ async def process_client_phone_text(message: types.Message, state: FSMContext):
     )
     await state.clear()
     
+    uid = message.from_user.id
     await message.answer(
         f"🏢 *{data['contact_name']} ({data['company_name']})*\n\nВыберите действие:",
-        reply_markup=main_menu_keyboard(is_client=True),
+        reply_markup=main_menu_keyboard(
+            is_client=True,
+            is_admin=int(uid) == int(ADMIN_USER_ID),
+        ),
         parse_mode="Markdown"
     )

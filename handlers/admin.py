@@ -78,10 +78,10 @@ def admin_only(func):
 def _admin_main_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="📡 Мониторинг смен", callback_data="admin_menu_monitoring")],
-            [InlineKeyboardButton(text="👥 Люди", callback_data="admin_menu_people")],
-            [InlineKeyboardButton(text="🗂 Проекты и смены", callback_data="admin_menu_ops")],
-            [InlineKeyboardButton(text="⚙️ Сервис", callback_data="admin_menu_service")],
+            [InlineKeyboardButton(text="📡 Мониторинг и риски", callback_data="admin_menu_monitoring")],
+            [InlineKeyboardButton(text="👥 Исполнители и заказчики", callback_data="admin_menu_people")],
+            [InlineKeyboardButton(text="🗂 Смены: создать и назначить", callback_data="admin_menu_ops")],
+            [InlineKeyboardButton(text="⚙️ Сервис и тест-данные", callback_data="admin_menu_service")],
         ]
     )
 
@@ -137,7 +137,13 @@ def _admin_service_keyboard() -> InlineKeyboardMarkup:
 @admin_only
 async def admin_panel(message: types.Message):
     await message.answer(
-        "🔐 *Админ-панель DEMO*\n\nВыберите действие:",
+        "🔐 *Админ-панель DEMO*\n\n"
+        "Коротко, куда жать:\n"
+        "• *Мониторинг* — кто не подтвердил, риски, логи\n"
+        "• *Люди* — исполнители и заказчики в системе\n"
+        "• *Смены* — проект, новая смена, *назначить людей*\n"
+        "• *Сервис* — заполнить демо-данными, проверить БД\n\n"
+        "Этот же экран: команда /admin или кнопка «Админ-панель» в меню.",
         reply_markup=_admin_main_keyboard(),
         parse_mode="Markdown",
     )
@@ -154,7 +160,12 @@ async def db_status_cmd(message: types.Message):
 @admin_only
 async def admin_menu_monitoring(callback: types.CallbackQuery):
     await callback.message.edit_text(
-        "📡 *Мониторинг смен*\n\nВыберите действие:",
+        "📡 *Мониторинг*\n\n"
+        "• *Статус выхода* — кто из исполнителей не нажал «подтвердил».\n"
+        "• *Рисковые смены* — опоздания и проблемы с чек-ином.\n"
+        "• *Метрики* — сколько людей и открытых смен.\n"
+        "• *Лог* — что делали в админке.\n\n"
+        "Нажмите кнопку ниже.",
         parse_mode="Markdown",
         reply_markup=_admin_monitoring_keyboard(),
     )
@@ -165,7 +176,9 @@ async def admin_menu_monitoring(callback: types.CallbackQuery):
 @admin_only
 async def admin_menu_people(callback: types.CallbackQuery):
     await callback.message.edit_text(
-        "👥 *Люди*\n\nИсполнители, статусы, заказчики:",
+        "👥 *Люди*\n\n"
+        "Здесь списки *исполнителей* (и их статус модерации) и *заказчиков*. "
+        "Удаление — только если человек ошибочно завёлся.",
         parse_mode="Markdown",
         reply_markup=_admin_people_keyboard(),
     )
@@ -176,7 +189,12 @@ async def admin_menu_people(callback: types.CallbackQuery):
 @admin_only
 async def admin_menu_ops(callback: types.CallbackQuery):
     await callback.message.edit_text(
-        "🗂 *Проекты и смены*\n\nСоздание и операционные действия:",
+        "🗂 *Проекты и смены*\n\n"
+        "Типичный порядок:\n"
+        "1) *Создать проект* (если ещё нет)\n"
+        "2) *Создать смену* (дата, время, адрес)\n"
+        "3) *Назначить на смену* — без этого заказчик не сможет поставить задачи\n\n"
+        "«Управление» — список для правок и удаления.",
         parse_mode="Markdown",
         reply_markup=_admin_ops_keyboard(),
     )
@@ -187,7 +205,9 @@ async def admin_menu_ops(callback: types.CallbackQuery):
 @admin_only
 async def admin_menu_service(callback: types.CallbackQuery):
     await callback.message.edit_text(
-        "⚙️ *Сервис*\n\nТехнические и вспомогательные функции:",
+        "⚙️ *Сервис*\n\n"
+        "*Тест-данные* — быстро наполнить демо людьми и сменами (для репетиции).\n"
+        "*Статус БД* — если что-то «пропало», смотреть первым делом.",
         parse_mode="Markdown",
         reply_markup=_admin_service_keyboard(),
     )
@@ -239,11 +259,17 @@ def _risk_filter_keyboard(current: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text=mark("all", "Все риски"), callback_data="admin_risk_dashboard"),
-                InlineKeyboardButton(text=mark("no_confirm", "No confirm"), callback_data="admin_risk_dashboard_no_confirm"),
-                InlineKeyboardButton(text=mark("late", "Late/no check-in"), callback_data="admin_risk_dashboard_late"),
+                InlineKeyboardButton(text=mark("all", "Все"), callback_data="admin_risk_dashboard"),
+                InlineKeyboardButton(
+                    text=mark("no_confirm", "Нет подтвержд."),
+                    callback_data="admin_risk_dashboard_no_confirm",
+                ),
+                InlineKeyboardButton(
+                    text=mark("late", "Чек-ин/опозд."),
+                    callback_data="admin_risk_dashboard_late",
+                ),
             ],
-            [InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back")],
+            [InlineKeyboardButton(text="🔙 В админ-меню", callback_data="admin_back")],
         ]
     )
 
@@ -1267,7 +1293,12 @@ async def admin_seed_data_run(callback: types.CallbackQuery):
 async def admin_back(callback: types.CallbackQuery, state: FSMContext):
     await state.clear()
     await callback.message.edit_text(
-        "🔐 *Админ-панель DEMO*\n\nВыберите действие:",
+        "🔐 *Админ-панель DEMO*\n\n"
+        "• *Мониторинг* — подтверждения и риски\n"
+        "• *Люди* — исполнители и заказчики\n"
+        "• *Смены* — создать смену и *назначить* исполнителей\n"
+        "• *Сервис* — демо-данные, БД\n\n"
+        "Команда /admin — то же самое.",
         reply_markup=_admin_main_keyboard(),
         parse_mode="Markdown",
     )

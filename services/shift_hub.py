@@ -21,6 +21,8 @@ I_FORGOT_CO = 20
 I_EXT_REQ_AT = 26
 I_EXT_RES_AT = 27
 I_GEO_OK = 30
+I_CONF_SHIFT_12H = 34
+I_CONF_SHIFT_3H = 35
 JOIN_MIN_LEN = 32
 
 R = "\U0001F534"
@@ -84,6 +86,20 @@ def _geo_line(row: tuple, shift_has_fence: bool) -> str:
     return "\u0433\u0435\u043e: ?"
 
 
+def _norm_geo_flag(geo_ok) -> int | None:
+    if geo_ok is None:
+        return None
+    if isinstance(geo_ok, bool):
+        return 1 if geo_ok else 0
+    if isinstance(geo_ok, (int, float)):
+        return int(geo_ok)
+    if isinstance(geo_ok, str):
+        s = geo_ok.strip()
+        if s in {"0", "1"}:
+            return int(s)
+    return None
+
+
 def _traffic_light(
     *,
     now: datetime,
@@ -96,6 +112,7 @@ def _traffic_light(
 ) -> tuple[str, str]:
     to_start = (dt_start - now).total_seconds()
     st = (status or "").lower()
+    geo_flag = _norm_geo_flag(geo_ok)
 
     if st == "cancelled":
         return W, "\u043e\u0442\u043c\u0435\u043d\u0430 \u0434\u043b\u044f \u0438\u0441\u043f\u043e\u043b\u043d\u0438\u0442\u0435\u043b\u044f"
@@ -106,7 +123,7 @@ def _traffic_light(
     if st == "checked_in":
         ci = _parse_ts(checkin_ts)
         late_ci = bool(ci and ci > dt_start)
-        if geo_ok is not None and int(geo_ok) == 0 and shift_has_fence:
+        if geo_flag == 0 and shift_has_fence:
             return R, "\u043d\u0430 \u0441\u043c\u0435\u043d\u0435, \u0433\u0435\u043e \u043d\u0435 \u043f\u0440\u043e\u0439\u0434\u0435\u043d\u043e"
         if late_ci:
             return Y, "\u043d\u0430 \u0441\u043c\u0435\u043d\u0435, \u043e\u043f\u043e\u0437\u0434\u0430\u043b \u0441 \u0447\u0435\u043a-\u0438\u043d\u043e\u043c"
@@ -214,6 +231,14 @@ def format_shift_hub(
             ev.append((a[I_CHECKOUT_30M], "\u043d\u0430\u043f\u043e\u043c\u0438\u043d\u0430\u043d\u0438\u0435 \u0447\u0435\u043a-\u0430\u0443\u0442 30\u043c"))
         if len(a) > I_FORGOT_CO and a[I_FORGOT_CO]:
             ev.append((a[I_FORGOT_CO], "\u0437\u0430\u0431\u044b\u043b\u0438 \u0447\u0435\u043a-\u0430\u0443\u0442"))
+        if len(a) > I_CONF_SHIFT_12H and a[I_CONF_SHIFT_12H]:
+            ev.append(
+                (a[I_CONF_SHIFT_12H], "\u043d\u0430\u043f\u043e\u043c\u0438\u043d\u0430\u043d\u0438\u0435 \u043e \u0441\u043c\u0435\u043d\u0435 ~12\u0447 (\u0432\u044b\u0445\u043e\u0434 \u0443\u0436\u0435 \u043f\u043e\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0451\u043d)")
+            )
+        if len(a) > I_CONF_SHIFT_3H and a[I_CONF_SHIFT_3H]:
+            ev.append(
+                (a[I_CONF_SHIFT_3H], "\u043d\u0430\u043f\u043e\u043c\u0438\u043d\u0430\u043d\u0438\u0435 \u043e \u0441\u043c\u0435\u043d\u0435 ~3\u0447 (\u0432\u044b\u0445\u043e\u0434 \u0443\u0436\u0435 \u043f\u043e\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0451\u043d)")
+            )
         if a[4]:
             ev.append((a[4], "\u043f\u043e\u0434\u0442\u0432\u0435\u0440\u0434\u0438\u043b \u0432\u044b\u0445\u043e\u0434"))
         if a[5]:
