@@ -1594,7 +1594,7 @@ def list_risky_assignments(kind: str = "all", limit: int = 100) -> list:
             s.end_time,
             s.location,
             p.client_id,
-            COALESCE(w.full_name, a.worker_id),
+            COALESCE(w.full_name, CAST(a.worker_id AS TEXT)),
             p.name
         FROM assignments a
         JOIN shifts s ON s.id = a.shift_id
