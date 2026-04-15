@@ -1,6 +1,7 @@
 # handlers/shifts.py
 import math
 from datetime import datetime
+from datetime import timedelta
 
 from aiogram import Router, F, types
 from aiogram.fsm.context import FSMContext
@@ -26,6 +27,7 @@ from db import (
     get_active_break,
     start_assignment_break,
     stop_assignment_break,
+    record_overdue_task_ping,
     list_shifts_for_client,
     list_shifts_for_worker,
     client_owns_shift,
@@ -1076,52 +1078,107 @@ async def client_message_worker_send(message: types.Message, state: FSMContext):
     await state.clear()
 
 
-@router.callback_query(F.data.startswith("report_"))
-async def show_shift_report(callback: types.CallbackQuery):
-    shift_id = int(callback.data.replace("report_", ""))
-    user_id = callback.from_user.id
-    if not get_client(user_id) or not client_owns_shift(user_id, shift_id):
-        await callback.answer("Нет доступа.", show_alert=True)
-        return
+def _report_tabs_keyboard(shift_id: int, tab: str, task_filter: str = "all") -> InlineKeyboardMarkup:
+    def mark(tab_id: str, label: str) -> str:
+        return f"• {label}" if tab == tab_id else label
 
-    report = get_shift_report(shift_id)
-    if not report["shift"]:
-        await callback.message.edit_text("❌ Смена не найдена.")
-        await callback.answer()
-        return
-
-    shift = report["shift"]
-    text = (
-        f"📊 *ОТЧЁТ ПО СМЕНЕ #{shift_id}*\n\n"
-        f"📆 {format_date_ru(shift[2])} | {shift[3]}-{shift[4]}\n📍 {shift[5]}\n💰 Ставка: {shift[6]} ₽/час\n\n👥 *ИСПОЛНИТЕЛИ:*\n"
+    rows = [
+        [
+            InlineKeyboardButton(text=mark("people", "Исполнители"), callback_data=f"report_tab_{shift_id}_people"),
+            InlineKeyboardButton(text=mark("tasks", "Задачи"), callback_data=f"report_tab_{shift_id}_tasks"),
+            InlineKeyboardButton(text=mark("breaks", "Перерывы"), callback_data=f"report_tab_{shift_id}_breaks"),
+        ],
+    ]
+    if tab == "tasks":
+        def fmark(v: str, label: str) -> str:
+            return f"• {label}" if task_filter == v else label
+        rows.append(
+            [
+                InlineKeyboardButton(text=fmark("all", "все"), callback_data=f"report_task_filter_{shift_id}_all"),
+                InlineKeyboardButton(text=fmark("open", "невыполненные"), callback_data=f"report_task_filter_{shift_id}_open"),
+                InlineKeyboardButton(text=fmark("overdue", "просроченные"), callback_data=f"report_task_filter_{shift_id}_overdue"),
+            ]
+        )
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="✉️ Пингнуть всех по просроченным задачам",
+                    callback_data=f"report_ping_overdue_{shift_id}",
+                )
+            ]
+        )
+    rows.extend(
+        [
+            [InlineKeyboardButton(text="📤 Поделиться сводкой", callback_data=f"report_share_{shift_id}")],
+            [InlineKeyboardButton(text="🔙 Назад", callback_data=f"shift_detail_{shift_id}")],
+        ]
     )
-    total_payment = 0
-    for a in report["assignments"]:
-        hours = float(a[9] or 0)
-        billed_h = float(a[26] or hours) if len(a) > 26 else hours
-        penalty_h = float(a[27] or 0) if len(a) > 27 else 0
-        payment = float(a[10] or 0)
-        total_payment += payment
-        status = "✅" if a[A_STATUS] == "checked_out" else "⏳"
-        name = _assign_worker_name(a)
-        extra = f" (штраф {penalty_h:.1f} ч)" if penalty_h > 0 else ""
-        text += f"{status} {name}: факт {hours:.1f} ч, к оплате {billed_h:.1f} ч{extra}, {payment:.0f} ₽\n"
-    text += f"\n💰 *ИТОГО:* {total_payment:.0f} ₽\n\n"
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
-    text += "📋 *ЗАДАЧИ:*\n"
+
+def _render_report_text(shift_id: int, report: dict, tab: str, task_filter: str = "all") -> str:
+    shift = report["shift"]
     tasks = report.get("tasks") or []
-    if not tasks:
-        text += "• задач нет\n"
+    assignments = report.get("assignments") or []
+    breaks = get_shift_breaks(shift_id)
+
+    # SLA-индикаторы
+    pending = sum(1 for a in assignments if str(a[A_STATUS]) == "pending")
+    late = sum(1 for a in assignments if str(a[17] or "") or str(a[18] or ""))
+    if pending > 0 or late > 0:
+        sla = "🔴 риск"
+    elif all(str(a[A_STATUS]) in ("confirmed", "checked_in", "checked_out") for a in assignments):
+        sla = "🟢 ок"
     else:
+        sla = "🟡 внимание"
+
+    header = (
+        f"📊 *ОТЧЁТ ПО СМЕНЕ #{shift_id}*\n\n"
+        f"📆 {format_date_ru(shift[2])} | {shift[3]}-{shift[4]}\n"
+        f"📍 {shift[5]}\n"
+        f"💰 Ставка: {shift[6]} ₽/час\n"
+        f"SLA: *{sla}*\n\n"
+    )
+
+    if tab == "people":
+        text = header + "👥 *ИСПОЛНИТЕЛИ*\n"
+        total_payment = 0.0
+        for a in assignments:
+            hours = float(a[9] or 0)
+            billed_h = float(a[26] or hours) if len(a) > 26 else hours
+            penalty_h = float(a[27] or 0) if len(a) > 27 else 0
+            payment = float(a[10] or 0)
+            total_payment += payment
+            status = "✅" if a[A_STATUS] == "checked_out" else "⏳"
+            name = _assign_worker_name(a)
+            extra = f" (штраф {penalty_h:.1f} ч)" if penalty_h > 0 else ""
+            text += f"{status} {name}: факт {hours:.1f} ч, к оплате {billed_h:.1f} ч{extra}, {payment:.0f} ₽\n"
+        text += f"\n💰 *ИТОГО:* {total_payment:.0f} ₽"
+        return text
+
+    if tab == "tasks":
+        text = header + "📋 *ЗАДАЧИ*\n"
+        if not tasks:
+            return text + "• задач нет\n"
         done = 0
+        shown = 0
+        shift_end = _parse_ts(f"{shift[2]} {str(shift[4])[:5]}") if shift and shift[2] and shift[4] else None
+        if shift_end and shift and str(shift[4])[:5] <= str(shift[3])[:5]:
+            # Ночная смена (через полночь)
+            shift_end = shift_end + timedelta(days=1)
         for t in tasks:
-            # t.* + worker_name в конце
             title = t[2] or "Задача"
             t_status = str(t[5] or "")
-            # assigned_at миграционно находится в конце t.* (перед worker_name)
             assigned_at = _parse_ts(t[-2] if len(t) >= 13 else None)
             completed_at = _parse_ts(t[6] if len(t) > 6 else None)
             worker_name = str(t[-1] or "Не назначен")
+            is_open = t_status != "completed"
+            is_overdue = bool(is_open and shift_end and now_local_naive() > shift_end)
+            if task_filter == "open" and not is_open:
+                continue
+            if task_filter == "overdue" and not is_overdue:
+                continue
+            shown += 1
             icon = "✅" if t_status == "completed" else "⏳"
             if t_status == "completed":
                 done += 1
@@ -1131,30 +1188,182 @@ async def show_shift_report(callback: types.CallbackQuery):
                 dur_line = f", время: {mins} мин"
             elif completed_at:
                 dur_line = f", закрыта: {completed_at.strftime('%d.%m %H:%M')}"
+            if is_overdue:
+                dur_line += ", ⚠️ просрочена"
             text += f"{icon} {title} — {worker_name}{dur_line}\n"
-        text += f"Итого задач: {len(tasks)}, выполнено: {done}\n"
+        if shown == 0:
+            text += "• по выбранному фильтру задач нет\n"
+        text += f"\nИтого задач: {len(tasks)}, выполнено: {done}, показано: {shown}"
+        return text
 
-    breaks = get_shift_breaks(shift_id)
-    if breaks:
-        text += "\n⏸ *ПЕРЕРЫВЫ:*\n"
-        by_worker: dict[int, int] = {}
-        by_name: dict[int, str] = {}
-        for b in breaks:
-            worker_id = int(b[2])
-            by_name[worker_id] = str(b[7] or worker_id)
-            st_dt = _parse_ts(b[4])
-            en_dt = _parse_ts(b[5])
-            if st_dt and en_dt and en_dt >= st_dt:
-                by_worker[worker_id] = by_worker.get(worker_id, 0) + int((en_dt - st_dt).total_seconds() // 60)
-        for wid, name in by_name.items():
-            total_m = by_worker.get(wid, 0)
-            text += f"• {name}: суммарно {total_m} мин\n"
-        text += "_Перерывы фиксируются для контроля; в расчёт оплаты пока не вычитаются._\n"
+    text = header + "⏸ *ПЕРЕРЫВЫ*\n"
+    if not breaks:
+        return text + "• перерывы не фиксировались\n"
+    by_worker: dict[int, int] = {}
+    by_name: dict[int, str] = {}
+    for b in breaks:
+        worker_id = int(b[2])
+        by_name[worker_id] = str(b[7] or worker_id)
+        st_dt = _parse_ts(b[4])
+        en_dt = _parse_ts(b[5])
+        if st_dt and en_dt and en_dt >= st_dt:
+            by_worker[worker_id] = by_worker.get(worker_id, 0) + int((en_dt - st_dt).total_seconds() // 60)
+    for wid, name in by_name.items():
+        total_m = by_worker.get(wid, 0)
+        text += f"• {name}: суммарно {total_m} мин\n"
+    text += "\n_Перерывы фиксируются для контроля; в расчёт оплаты пока не вычитаются._"
+    return text
 
-    keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="🔙 Назад", callback_data=f"shift_detail_{shift_id}")]
-        ]
+
+@router.callback_query(F.data.startswith("report_share_"))
+async def report_share(callback: types.CallbackQuery):
+    shift_id = int(callback.data.replace("report_share_", ""))
+    user_id = callback.from_user.id
+    if not get_client(user_id) or not client_owns_shift(user_id, shift_id):
+        await callback.answer("Нет доступа.", show_alert=True)
+        return
+    report = get_shift_report(shift_id)
+    if not report["shift"]:
+        await callback.answer("Смена не найдена.", show_alert=True)
+        return
+    text = _render_report_text(shift_id, report, "people")
+    await callback.message.answer("📤 *Краткая сводка для пересылки:*\n\n" + text, parse_mode="Markdown")
+    await callback.answer("Сводка отправлена ниже.")
+
+
+@router.callback_query(F.data.startswith("report_tab_"))
+async def show_shift_report_tab(callback: types.CallbackQuery):
+    raw = callback.data.replace("report_tab_", "")
+    parts = raw.split("_", 1)
+    if len(parts) != 2 or not parts[0].isdigit():
+        await callback.answer()
+        return
+    shift_id = int(parts[0])
+    tab = parts[1] if parts[1] in ("people", "tasks", "breaks") else "people"
+    task_filter = "all"
+    user_id = callback.from_user.id
+    if not get_client(user_id) or not client_owns_shift(user_id, shift_id):
+        await callback.answer("Нет доступа.", show_alert=True)
+        return
+    report = get_shift_report(shift_id)
+    if not report["shift"]:
+        await callback.message.edit_text("❌ Смена не найдена.")
+        await callback.answer()
+        return
+    text = _render_report_text(shift_id, report, tab, task_filter)
+    await callback.message.edit_text(
+        text,
+        reply_markup=_report_tabs_keyboard(shift_id, tab, task_filter),
+        parse_mode="Markdown",
     )
-    await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="Markdown")
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("report_task_filter_"))
+async def report_task_filter(callback: types.CallbackQuery):
+    raw = callback.data.replace("report_task_filter_", "")
+    parts = raw.split("_", 1)
+    if len(parts) != 2 or not parts[0].isdigit():
+        await callback.answer()
+        return
+    shift_id = int(parts[0])
+    task_filter = parts[1] if parts[1] in ("all", "open", "overdue") else "all"
+    user_id = callback.from_user.id
+    if not get_client(user_id) or not client_owns_shift(user_id, shift_id):
+        await callback.answer("Нет доступа.", show_alert=True)
+        return
+    report = get_shift_report(shift_id)
+    if not report["shift"]:
+        await callback.message.edit_text("❌ Смена не найдена.")
+        await callback.answer()
+        return
+    text = _render_report_text(shift_id, report, "tasks", task_filter)
+    await callback.message.edit_text(
+        text,
+        reply_markup=_report_tabs_keyboard(shift_id, "tasks", task_filter),
+        parse_mode="Markdown",
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("report_ping_overdue_"))
+async def report_ping_overdue(callback: types.CallbackQuery):
+    shift_id = int(callback.data.replace("report_ping_overdue_", ""))
+    user_id = callback.from_user.id
+    if not get_client(user_id) or not client_owns_shift(user_id, shift_id):
+        await callback.answer("Нет доступа.", show_alert=True)
+        return
+    report = get_shift_report(shift_id)
+    shift = report.get("shift")
+    if not shift:
+        await callback.answer("Смена не найдена.", show_alert=True)
+        return
+    shift_end = _parse_ts(f"{shift[2]} {str(shift[4])[:5]}")
+    if shift_end and str(shift[4])[:5] <= str(shift[3])[:5]:
+        shift_end = shift_end + timedelta(days=1)
+    if not shift_end or now_local_naive() <= shift_end:
+        await callback.answer("Смена ещё не завершена — просрочек по SLA пока нет.", show_alert=True)
+        return
+
+    tasks = report.get("tasks") or []
+    per_worker: dict[int, list[str]] = {}
+    for t in tasks:
+        status = str(t[5] or "")
+        if status == "completed":
+            continue
+        wid = t[4] if len(t) > 4 else None
+        if wid is None:
+            continue
+        worker_id = int(wid)
+        title = str(t[2] or "Задача")
+        per_worker.setdefault(worker_id, []).append(title)
+
+    if not per_worker:
+        await callback.answer("Нет открытых просроченных задач для пинга.", show_alert=True)
+        return
+
+    sent = 0
+    for wid, titles in per_worker.items():
+        preview = "\n".join([f"• {x}" for x in titles[:8]])
+        if len(titles) > 8:
+            preview += f"\n• … и ещё {len(titles) - 8}"
+        try:
+            await callback.bot.send_message(
+                int(wid),
+                "⚠️ *Напоминание по просроченным задачам*\n\n"
+                f"Смена #{shift_id} уже завершилась, но у вас есть невыполненные задачи:\n"
+                f"{preview}\n\n"
+                "Пожалуйста, завершите задачи или свяжитесь с координатором.",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup(
+                    inline_keyboard=[
+                        [InlineKeyboardButton(text="Открыть задачи смены", callback_data=f"tasks_{shift_id}")]
+                    ]
+                ),
+            )
+            sent += 1
+            record_overdue_task_ping(shift_id, int(wid))
+        except Exception:
+            pass
+    await callback.answer(f"Пинг отправлен {sent} исполнителям.", show_alert=True)
+
+
+@router.callback_query(F.data.startswith("report_"))
+async def show_shift_report(callback: types.CallbackQuery):
+    shift_id = int(callback.data.replace("report_", ""))
+    user_id = callback.from_user.id
+    if not get_client(user_id) or not client_owns_shift(user_id, shift_id):
+        await callback.answer("Нет доступа.", show_alert=True)
+        return
+    report = get_shift_report(shift_id)
+    if not report["shift"]:
+        await callback.message.edit_text("❌ Смена не найдена.")
+        await callback.answer()
+        return
+    text = _render_report_text(shift_id, report, "people")
+    await callback.message.edit_text(
+        text,
+        reply_markup=_report_tabs_keyboard(shift_id, "people", "all"),
+        parse_mode="Markdown",
+    )
     await callback.answer()

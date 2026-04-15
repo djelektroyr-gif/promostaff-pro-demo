@@ -40,3 +40,6 @@ BILLING_ROUNDING_MODE = (os.getenv("BILLING_ROUNDING_MODE", "none") or "none").s
 # Время напоминаний (в часах до начала смены)
 REMINDER_12H = 12
 REMINDER_3H = 3
+
+# Эскалация после пинга просроченных задач (в минутах)
+OVERDUE_TASK_ESCALATION_MINUTES = int(os.getenv("OVERDUE_TASK_ESCALATION_MINUTES", "30"))

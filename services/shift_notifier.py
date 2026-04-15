@@ -6,11 +6,15 @@ from datetime import datetime, timedelta
 from aiogram import Bot
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-from config import ADMIN_USER_ID
+from config import ADMIN_USER_ID, OVERDUE_TASK_ESCALATION_MINUTES
 from db import (
     list_assignments_for_scheduler,
     mark_assignment_event,
     format_date_ru,
+    list_due_overdue_task_escalations,
+    has_open_tasks_for_worker_on_shift,
+    list_open_task_titles_for_worker_on_shift,
+    mark_overdue_task_escalated,
 )
 from services.delivery import send_message_with_retry
 from services.time_utils import now_local_naive, shift_start_end_local_naive
@@ -226,3 +230,40 @@ async def run_notifications_once(bot: Bot) -> None:
                 mark_assignment_event(int(assignment_id), "forgot_checkout_sent_at")
         except Exception:
             logger.exception("scheduler row failed shift_id=%s worker_id=%s", r[1], r[2])
+
+    # Эскалация по просроченным задачам после массового пинга.
+    try:
+        for ping_row in list_due_overdue_task_escalations(wait_minutes=OVERDUE_TASK_ESCALATION_MINUTES):
+            try:
+                ping_id, shift_id, worker_id, _ping_sent_at, client_id, worker_name = ping_row
+                if not has_open_tasks_for_worker_on_shift(int(shift_id), int(worker_id)):
+                    mark_overdue_task_escalated(int(ping_id))
+                    continue
+
+                titles = list_open_task_titles_for_worker_on_shift(int(shift_id), int(worker_id), limit=5)
+                preview = "\n".join([f"• {t}" for t in titles]) if titles else "• (список задач недоступен)"
+                text = (
+                    f"🚨 После пинга просроченные задачи всё ещё не закрыты.\n\n"
+                    f"Смена: #{shift_id}\n"
+                    f"Исполнитель: {worker_name or worker_id}\n"
+                    f"Открытые задачи:\n{preview}\n\n"
+                    "Рекомендуем связаться с исполнителем или назначить замену."
+                )
+                await send_message_with_retry(
+                    bot,
+                    int(ADMIN_USER_ID),
+                    text,
+                    context=f"overdue_escal_admin:{ping_id}",
+                )
+                if client_id:
+                    await send_message_with_retry(
+                        bot,
+                        int(client_id),
+                        text,
+                        context=f"overdue_escal_client:{ping_id}",
+                    )
+                mark_overdue_task_escalated(int(ping_id))
+            except Exception:
+                logger.exception("overdue escalation failed ping_id=%s", ping_row[0] if ping_row else None)
+    except Exception:
+        logger.exception("overdue escalation batch failed")

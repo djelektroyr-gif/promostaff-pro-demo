@@ -440,6 +440,17 @@ def init_db():
         )
         """
     )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS overdue_task_pings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            shift_id INTEGER NOT NULL,
+            worker_id INTEGER NOT NULL,
+            ping_sent_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            escalated_at TIMESTAMP
+        )
+        """
+    )
 
     # Миграция: у старых БД может не быть колонки workers.status
     cur.execute("PRAGMA table_info(workers)")
@@ -1298,6 +1309,93 @@ def get_shift_breaks(shift_id: int) -> list:
     rows = cur.fetchall()
     conn.close()
     return rows
+
+
+def record_overdue_task_ping(shift_id: int, worker_id: int) -> None:
+    conn = db_connect()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO overdue_task_pings (shift_id, worker_id)
+        VALUES (?, ?)
+        """,
+        (shift_id, worker_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def list_due_overdue_task_escalations(wait_minutes: int = 30) -> list:
+    conn = db_connect()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT
+            p.id,
+            p.shift_id,
+            p.worker_id,
+            p.ping_sent_at,
+            pr.client_id,
+            COALESCE(w.full_name, p.worker_id)
+        FROM overdue_task_pings p
+        JOIN shifts s ON s.id = p.shift_id
+        JOIN projects pr ON pr.id = s.project_id
+        LEFT JOIN workers w ON w.user_id = p.worker_id
+        WHERE p.escalated_at IS NULL
+          AND p.ping_sent_at <= datetime(CURRENT_TIMESTAMP, ?)
+        ORDER BY p.id
+        """,
+        (f"-{int(wait_minutes)} minutes",),
+    )
+    rows = cur.fetchall()
+    conn.close()
+    return rows
+
+
+def mark_overdue_task_escalated(ping_id: int) -> None:
+    conn = db_connect()
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE overdue_task_pings SET escalated_at = CURRENT_TIMESTAMP WHERE id = ?",
+        (ping_id,),
+    )
+    conn.commit()
+    conn.close()
+
+
+def has_open_tasks_for_worker_on_shift(shift_id: int, worker_id: int) -> bool:
+    conn = db_connect()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT 1
+        FROM tasks
+        WHERE shift_id = ? AND assigned_to = ? AND status != 'completed'
+        LIMIT 1
+        """,
+        (shift_id, worker_id),
+    )
+    ok = cur.fetchone() is not None
+    conn.close()
+    return ok
+
+
+def list_open_task_titles_for_worker_on_shift(shift_id: int, worker_id: int, limit: int = 5) -> list[str]:
+    conn = db_connect()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT title
+        FROM tasks
+        WHERE shift_id = ? AND assigned_to = ? AND status != 'completed'
+        ORDER BY id
+        LIMIT ?
+        """,
+        (shift_id, worker_id, limit),
+    )
+    rows = cur.fetchall()
+    conn.close()
+    return [str(r[0] or "Задача") for r in rows]
 
 
 def assignment_join_worker_name(row: tuple) -> str:
