@@ -60,16 +60,26 @@ def _worker_name(row: tuple) -> str:
 def _geo_ok_val(row: tuple):
     if len(row) < JOIN_MIN_LEN:
         return None
-    return row[I_GEO_OK]
+    val = row[I_GEO_OK]
+    # На старых/рассинхронизированных схемах здесь может оказаться не int-флаг.
+    if isinstance(val, bool):
+        return 1 if val else 0
+    if isinstance(val, (int, float)):
+        return int(val)
+    if isinstance(val, str):
+        s = val.strip()
+        if s in {"0", "1"}:
+            return int(s)
+    return None
 
 
 def _geo_line(row: tuple, shift_has_fence: bool) -> str:
     ok = _geo_ok_val(row)
     if ok is None:
         return "\u0433\u0435\u043e: \u043d\u0435 \u043a\u043e\u043d\u0442\u0440\u043e\u043b\u0438\u0440\u0443\u0435\u0442\u0441\u044f" if not shift_has_fence else "\u0433\u0435\u043e: \u043e\u0436\u0438\u0434\u0430\u043d\u0438\u0435"
-    if int(ok) == 1:
+    if ok == 1:
         return "\u0433\u0435\u043e: \u0432 \u0440\u0430\u0434\u0438\u0443\u0441\u0435"
-    if int(ok) == 0:
+    if ok == 0:
         return "\u0433\u0435\u043e: \u0431\u044b\u043b\u0438 \u043f\u043e\u043f\u044b\u0442\u043a\u0438 \u0432\u043d\u0435 \u0440\u0430\u0434\u0438\u0443\u0441\u0430"
     return "\u0433\u0435\u043e: ?"
 
