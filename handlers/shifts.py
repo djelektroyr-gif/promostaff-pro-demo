@@ -75,10 +75,37 @@ def _distance_m(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
 def _shift_geo_limits(shift: tuple | None) -> tuple[float | None, float | None, int]:
     if not shift or len(shift) < 12:
         return None, None, 300
-    lat = shift[9]
-    lng = shift[10]
-    radius = int(shift[11] or 300)
-    return lat, lng, radius
+
+    def _to_float(v):
+        try:
+            return float(v) if v is not None and str(v).strip() != "" else None
+        except Exception:
+            return None
+
+    def _to_radius(v):
+        try:
+            r = int(float(v))
+        except Exception:
+            return None
+        return r if r > 0 else None
+
+    # Поддерживаем обе схемы:
+    # 1) старая SQLite с миграциями: [..., created_at, expected_lat, expected_lng, checkin_radius_m]
+    # 2) новая/чистая:            [..., expected_lat, expected_lng, checkin_radius_m, created_at]
+    variants = (
+        (shift[8], shift[9], shift[10]),   # new order
+        (shift[9], shift[10], shift[11]),  # migrated old order
+    )
+    for lat_raw, lng_raw, radius_raw in variants:
+        lat = _to_float(lat_raw)
+        lng = _to_float(lng_raw)
+        radius = _to_radius(radius_raw)
+        if lat is not None and lng is not None and radius is not None:
+            return lat, lng, radius
+
+    # Фолбэк: гео-ограждение выключено, но радиус пробуем сохранить.
+    radius = _to_radius(shift[10]) or _to_radius(shift[11]) or 300
+    return None, None, radius
 
 
 def _shift_start(shift: tuple) -> datetime:

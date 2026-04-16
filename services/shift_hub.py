@@ -100,6 +100,31 @@ def _norm_geo_flag(geo_ok) -> int | None:
     return None
 
 
+def _shift_geo_fields(shift: tuple) -> tuple[float | None, float | None]:
+    if not shift or len(shift) < 12:
+        return None, None
+
+    def _to_float(v):
+        try:
+            return float(v) if v is not None and str(v).strip() != "" else None
+        except Exception:
+            return None
+
+    # Новая схема: lat/lng/radius/created_at
+    lat = _to_float(shift[8])
+    lng = _to_float(shift[9])
+    if lat is not None and lng is not None:
+        return lat, lng
+
+    # Старая мигрированная схема: created_at/lat/lng/radius
+    lat = _to_float(shift[9])
+    lng = _to_float(shift[10])
+    if lat is not None and lng is not None:
+        return lat, lng
+
+    return None, None
+
+
 def _traffic_light(
     *,
     now: datetime,
@@ -170,7 +195,7 @@ def format_shift_hub(
     except Exception:
         dt_start = now
 
-    exp_lat, exp_lng = shift[9], shift[10]
+    exp_lat, exp_lng = _shift_geo_fields(shift)
     shift_has_fence = exp_lat is not None and exp_lng is not None
 
     assignments = rep.get("assignments") or []
