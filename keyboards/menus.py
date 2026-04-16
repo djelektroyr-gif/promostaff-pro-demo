@@ -71,7 +71,6 @@ def client_overview_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="📋 Мои проекты", callback_data="my_projects")],
-            [InlineKeyboardButton(text="➕ Создать проект", callback_data="create_project")],
             [InlineKeyboardButton(text="🔙 Назад", callback_data="main_menu")],
         ]
     )

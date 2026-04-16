@@ -183,7 +183,13 @@ async def show_main_menu(callback: types.CallbackQuery):
         text = "👷 " + bold(str(worker[1])) + "\n\n" + em("Выберите действие:")
         markup = main_menu_keyboard(is_worker=True)
     elif client:
-        text = "🏢 " + bold(str(client[2])) + " (" + em(str(client[1])) + ")\n\n" + em("Выберите действие:")
+        text = (
+            "🏢 "
+            + bold(str(client[2]))
+            + em(f" ({client[1]})")
+            + "\n\n"
+            + em("Выберите действие:")
+        )
         markup = main_menu_keyboard(is_client=True)
     else:
         text = "🌟 " + bold("Добро пожаловать!") + "\n\n" + em("Выберите вашу роль:")
@@ -242,13 +248,13 @@ async def client_menu_tasks(callback: types.CallbackQuery):
         callback,
         bold("Задачи для исполнителей")
         + "\n\n"
-        + "1) "
+        + em("1) ")
         + em('Нажмите «Новая задача для исполнителя».')
         + "\n"
-        + "2) "
+        + em("2) ")
         + em("Выберите смену → введите название и описание.")
         + "\n"
-        + "3) "
+        + em("3) ")
         + em("Укажите, кому на смене отправить — люди получат уведомление.")
         + "\n\n"
         + em('«Смотреть все задачи» — список и оценки после выполнения.'),
