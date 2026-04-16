@@ -1261,6 +1261,45 @@ def start_assignment_break(shift_id: int, worker_id: int, break_type: str, note:
     return True
 
 
+def get_worker_break_stats(shift_id: int, worker_id: int) -> dict:
+    conn = db_connect()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT break_type, started_at, ended_at
+        FROM assignment_breaks
+        WHERE shift_id = ? AND worker_id = ?
+        ORDER BY started_at
+        """,
+        (shift_id, worker_id),
+    )
+    rows = cur.fetchall()
+    conn.close()
+    stats = {
+        "lunch_count": 0,
+        "smoke_count": 0,
+        "tech_count": 0,
+        "tech_total_minutes": 0,
+    }
+    for break_type, started_at, ended_at in rows:
+        btype = str(break_type or "")
+        if btype == "lunch":
+            stats["lunch_count"] += 1
+        elif btype == "smoke":
+            stats["smoke_count"] += 1
+        elif btype == "tech":
+            stats["tech_count"] += 1
+        if btype == "tech":
+            try:
+                st_dt = _parse_sqlite_ts(started_at)
+                en_dt = _parse_sqlite_ts(ended_at) if ended_at else now_local_naive()
+                if en_dt >= st_dt:
+                    stats["tech_total_minutes"] += int((en_dt - st_dt).total_seconds() // 60)
+            except Exception:
+                continue
+    return stats
+
+
 def stop_assignment_break(shift_id: int, worker_id: int) -> bool:
     conn = db_connect()
     cur = conn.cursor()
@@ -1281,6 +1320,43 @@ def stop_assignment_break(shift_id: int, worker_id: int) -> bool:
     conn.commit()
     conn.close()
     return ok
+
+
+def auto_close_expired_breaks(now_dt: datetime | None = None) -> list[tuple[int, int, str]]:
+    now_dt = now_dt or now_local_naive()
+    limits_min = {"lunch": 30, "smoke": 5, "tech": 10}
+    conn = db_connect()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT id, shift_id, worker_id, break_type, started_at
+        FROM assignment_breaks
+        WHERE ended_at IS NULL
+        ORDER BY started_at
+        """
+    )
+    rows = cur.fetchall()
+    closed: list[tuple[int, int, str]] = []
+    for break_id, shift_id, worker_id, break_type, started_at in rows:
+        limit = limits_min.get(str(break_type or ""))
+        if not limit:
+            continue
+        try:
+            st_dt = _parse_sqlite_ts(started_at)
+        except Exception:
+            continue
+        end_at = st_dt + timedelta(minutes=limit)
+        if now_dt < end_at:
+            continue
+        cur.execute(
+            "UPDATE assignment_breaks SET ended_at = ? WHERE id = ? AND ended_at IS NULL",
+            (end_at, break_id),
+        )
+        if cur.rowcount > 0:
+            closed.append((int(shift_id), int(worker_id), str(break_type or "")))
+    conn.commit()
+    conn.close()
+    return closed
 
 
 def get_active_break(shift_id: int, worker_id: int):

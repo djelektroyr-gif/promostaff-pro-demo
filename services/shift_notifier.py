@@ -15,6 +15,7 @@ from db import (
     has_open_tasks_for_worker_on_shift,
     list_open_task_titles_for_worker_on_shift,
     mark_overdue_task_escalated,
+    auto_close_expired_breaks,
 )
 from services.delivery import send_message_with_retry
 from services.text_utils import bold, escape_markdown as em
@@ -61,6 +62,10 @@ def _in_window(to_event_sec: float, target_sec: int, window_sec: int = REMINDER_
 
 async def run_notifications_once(bot: Bot) -> None:
     now = now_local_naive()
+    try:
+        auto_close_expired_breaks(now)
+    except Exception:
+        logger.exception("auto close expired breaks failed")
     rows = list_assignments_for_scheduler()
     for r in rows:
         try:

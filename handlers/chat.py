@@ -148,7 +148,12 @@ async def prompt_project_chat_message(callback: types.CallbackQuery, state: FSMC
         return
     await state.update_data(project_chat_id=project_id)
     await state.set_state(ProjectChatState.waiting_for_message)
-    await callback.message.answer("✏️ Введите сообщение для чата проекта:")
+    await callback.message.answer(
+        "✏️ Введите сообщение для чата проекта:",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_flow")]]
+        ),
+    )
     await callback.answer()
 
 
@@ -248,6 +253,9 @@ async def prompt_chat_message(callback: types.CallbackQuery, state: FSMContext):
     await callback.message.answer(
         "✏️ Напишите сообщение для чата одним текстом (можно вставить ссылку). Стикеры и фото сюда не сохраняются.",
         parse_mode=None,
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_flow")]]
+        ),
     )
     await callback.answer()
 

@@ -25,6 +25,7 @@ from db import (
     do_checkout,
     get_shift_report,
     get_shift_breaks,
+    get_worker_break_stats,
     get_active_break,
     start_assignment_break,
     stop_assignment_break,
@@ -40,6 +41,7 @@ from db import (
     extend_shift_end_time,
     set_assignment_checkin_geo_failed,
     format_date_ru,
+    auto_close_expired_breaks,
 )
 from config import PARSE_MODE_TELEGRAM, is_admin_user
 from services.admin_broadcast import send_all_admins
@@ -148,6 +150,14 @@ def _assignment_status_line(a: tuple) -> str:
     if status == "cancelled":
         return "🚫 Отменён"
     return status
+
+
+def _shift_duration_hours(shift: tuple) -> int:
+    try:
+        dt_start, dt_end = shift_start_end_local_naive(str(shift[2]), str(shift[3]), str(shift[4]))
+        return max(1, int((dt_end - dt_start).total_seconds() // 3600))
+    except Exception:
+        return 1
 
 
 def _parse_ts(value):
@@ -641,7 +651,10 @@ async def shift_detail(callback: types.CallbackQuery):
                 InlineKeyboardButton(text="📋 Проекты", callback_data="my_projects"),
                 InlineKeyboardButton(text="✅ Все задачи", callback_data="my_client_tasks"),
             ],
-            [InlineKeyboardButton(text="🔙 Назад", callback_data="my_shifts")],
+            [
+                InlineKeyboardButton(text="🔙 Назад", callback_data="my_shifts"),
+                InlineKeyboardButton(text="🏠 Меню", callback_data="main_menu"),
+            ],
         ]
     )
     await safe_edit_or_resend(callback, text, reply_markup=keyboard, parse_mode=None)
@@ -652,6 +665,7 @@ async def shift_detail(callback: types.CallbackQuery):
 async def worker_shift_detail(callback: types.CallbackQuery):
     shift_id = int(callback.data.replace("worker_shift_", ""))
     user_id = callback.from_user.id
+    auto_close_expired_breaks()
     shift = get_shift(shift_id)
     assignment = get_assignment(shift_id, user_id)
 
@@ -721,7 +735,12 @@ async def worker_shift_detail(callback: types.CallbackQuery):
             InlineKeyboardButton(text="📋 Мои задачи", callback_data="my_tasks"),
         ]
     )
-    keyboard_rows.append([InlineKeyboardButton(text="🔙 Назад", callback_data="my_shifts")])
+    keyboard_rows.append(
+        [
+            InlineKeyboardButton(text="🔙 Назад", callback_data="my_shifts"),
+            InlineKeyboardButton(text="🏠 Меню", callback_data="main_menu"),
+        ]
+    )
     keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
     await safe_edit_or_resend(callback, text, reply_markup=keyboard, parse_mode=None)
     await callback.answer()
@@ -767,6 +786,9 @@ async def checkin_start(callback: types.CallbackQuery, state: FSMContext):
         "3) Отправьте селфи фото (не как файл)\n\n"
         "⚠️ Одним сообщением чек-ин отправить нельзя.",
         parse_mode=None,
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_flow")]]
+        ),
     )
     await callback.answer()
 
@@ -774,6 +796,7 @@ async def checkin_start(callback: types.CallbackQuery, state: FSMContext):
 @router.callback_query(F.data.startswith("break_start_"))
 async def break_start_menu(callback: types.CallbackQuery):
     shift_id = int(callback.data.replace("break_start_", ""))
+    auto_close_expired_breaks()
     assignment = get_assignment(shift_id, callback.from_user.id)
     if not assignment or assignment[3] != "checked_in":
         await callback.answer("Перерыв доступен только во время смены (после чек-ина).", show_alert=True)
@@ -783,9 +806,9 @@ async def break_start_menu(callback: types.CallbackQuery):
         return
     kb = InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="🍽 Обед", callback_data=f"break_type_{shift_id}_lunch")],
-            [InlineKeyboardButton(text="🚬 Перекур", callback_data=f"break_type_{shift_id}_smoke")],
-            [InlineKeyboardButton(text="🚻 Тех. перерыв", callback_data=f"break_type_{shift_id}_tech")],
+            [InlineKeyboardButton(text="🍽 Обед до 30 мин", callback_data=f"break_type_{shift_id}_lunch")],
+            [InlineKeyboardButton(text="🚬 Перекур до 5 мин", callback_data=f"break_type_{shift_id}_smoke")],
+            [InlineKeyboardButton(text="🚻 Тех. перерыв до 10 мин", callback_data=f"break_type_{shift_id}_tech")],
             [InlineKeyboardButton(text="🔙 Назад к смене", callback_data=f"worker_shift_{shift_id}")],
         ]
     )
@@ -797,16 +820,51 @@ async def break_start_menu(callback: types.CallbackQuery):
 async def break_type_start(callback: types.CallbackQuery):
     _, _, shift_raw, break_type = callback.data.split("_", 3)
     shift_id = int(shift_raw)
+    auto_close_expired_breaks()
     assignment = get_assignment(shift_id, callback.from_user.id)
     if not assignment or assignment[3] != "checked_in":
         await callback.answer("Недоступно: нет активной смены.", show_alert=True)
         return
+    shift = get_shift(shift_id)
+    stats = get_worker_break_stats(shift_id, callback.from_user.id)
+    now = now_local_naive()
+    checkin_time = _parse_ts(assignment[5])
+    if break_type == "lunch" and stats["lunch_count"] >= 1:
+        await callback.answer("Обеденный перерыв можно взять только один раз за смену.", show_alert=True)
+        return
+    if break_type == "smoke":
+        if not checkin_time or (now - checkin_time).total_seconds() < 3600:
+            await callback.answer("Перекур доступен не раньше чем через 1 час после чек-ина.", show_alert=True)
+            return
+        try:
+            _dt_start, dt_end = shift_start_end_local_naive(str(shift[2]), str(shift[3]), str(shift[4]))
+            if (dt_end - now).total_seconds() < 3600:
+                await callback.answer("Перекур недоступен в последний час смены.", show_alert=True)
+                return
+        except Exception:
+            pass
+        max_smokes = max(0, _shift_duration_hours(shift) - 1)
+        if stats["smoke_count"] >= max_smokes:
+            await callback.answer(
+                f"Лимит перекуров на эту смену исчерпан: {max_smokes}.",
+                show_alert=True,
+            )
+            return
+    if break_type == "tech":
+        if not checkin_time or (now - checkin_time).total_seconds() < 15 * 60:
+            await callback.answer("Тех. перерыв доступен не раньше чем через 15 минут после чек-ина.", show_alert=True)
+            return
     ok = start_assignment_break(shift_id, callback.from_user.id, break_type, "")
     if not ok:
         await callback.answer("Перерыв уже запущен.", show_alert=True)
         return
+    label = {
+        "lunch": "Обед до 30 минут. Если не завершите сами, бот закроет его автоматически.",
+        "smoke": "Перекур до 5 минут. Если не завершите сами, бот закроет его автоматически.",
+        "tech": "Тех. перерыв до 10 минут. Если не завершите сами, бот закроет его автоматически.",
+    }.get(break_type, f"Перерыв начат ({break_type}).")
     await safe_edit_or_resend(callback, 
-        f"⏸ Перерыв начат ({break_type}).\nНажмите «Завершить перерыв», когда вернётесь.",
+        f"⏸ {label}\n\nНажмите «Завершить перерыв», когда вернётесь.",
         reply_markup=InlineKeyboardMarkup(
             inline_keyboard=[
                 [InlineKeyboardButton(text="▶️ Завершить перерыв", callback_data=f"break_stop_{shift_id}")],
@@ -820,6 +878,7 @@ async def break_type_start(callback: types.CallbackQuery):
 @router.callback_query(F.data.startswith("break_stop_"))
 async def break_stop_now(callback: types.CallbackQuery):
     shift_id = int(callback.data.replace("break_stop_", ""))
+    auto_close_expired_breaks()
     ok = stop_assignment_break(shift_id, callback.from_user.id)
     if not ok:
         await callback.answer("Активный перерыв не найден.", show_alert=True)
@@ -978,6 +1037,9 @@ async def checkout_start(callback: types.CallbackQuery, state: FSMContext):
         "2) Затем селфи фото (не как файл)\n\n"
         "⚠️ Одним сообщением чек-аут отправить нельзя.",
         parse_mode=None,
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_flow")]]
+        ),
     )
     await callback.answer()
 
@@ -1345,6 +1407,15 @@ def _render_report_text(shift_id: int, report: dict, tab: str, task_filter: str 
     if tab == "people":
         text = header + "👥 ИСПОЛНИТЕЛИ\n"
         total_payment = 0.0
+        tech_totals: dict[int, int] = {}
+        for b in breaks:
+            if str(b[3] or "") != "tech":
+                continue
+            st_dt = _parse_ts(b[4])
+            en_dt = _parse_ts(b[5])
+            if st_dt and en_dt and en_dt >= st_dt:
+                wid = int(b[2])
+                tech_totals[wid] = tech_totals.get(wid, 0) + int((en_dt - st_dt).total_seconds() // 60)
         for a in assignments:
             hours = float(a[9] or 0)
             billed_h = float(a[26] or hours) if len(a) > 26 else hours
@@ -1354,7 +1425,11 @@ def _render_report_text(shift_id: int, report: dict, tab: str, task_filter: str 
             status = "✅" if a[A_STATUS] == "checked_out" else "⏳"
             name = _assign_worker_name(a)
             extra = f" (штраф {penalty_h:.1f} ч)" if penalty_h > 0 else ""
-            text += f"{status} {name}: факт {hours:.1f} ч, к оплате {billed_h:.1f} ч{extra}, {payment:.0f} ₽\n"
+            tech_extra = ""
+            tech_total = tech_totals.get(int(a[2]), 0)
+            if tech_total > 30:
+                tech_extra = f", ⚠️ тех. перерывы {tech_total} мин"
+            text += f"{status} {name}: факт {hours:.1f} ч, к оплате {billed_h:.1f} ч{extra}, {payment:.0f} ₽{tech_extra}\n"
         text += f"\n💰 ИТОГО: {total_payment:.0f} ₽"
         return text
 
@@ -1412,7 +1487,8 @@ def _render_report_text(shift_id: int, report: dict, tab: str, task_filter: str 
             by_worker[worker_id] = by_worker.get(worker_id, 0) + int((en_dt - st_dt).total_seconds() // 60)
     for wid, name in by_name.items():
         total_m = by_worker.get(wid, 0)
-        text += f"• {name}: суммарно {total_m} мин\n"
+        warn = " ⚠️ риск" if total_m > 30 else ""
+        text += f"• {name}: суммарно {total_m} мин{warn}\n"
     text += "\nПерерывы фиксируются для контроля; в расчёт оплаты пока не вычитаются."
     return text
 
@@ -1427,10 +1503,6 @@ async def _notify_shift_closed_summary(bot: Bot, shift_id: int, reason: str) -> 
         return
     summary = _render_report_text(shift_id, report, "people")
     body = f"✅ Смена #{shift_id} закрыта ({reason}).\n\n{summary}"
-    try:
-        await send_all_admins(bot, body, parse_mode=None)
-    except Exception as e:
-        logger.warning("auto summary to admins failed shift_id=%s: %s", shift_id, e, exc_info=True)
     try:
         shift_owner = get_shift_with_owner(shift_id)
         client_id = int(shift_owner[7]) if shift_owner and shift_owner[7] else None

@@ -35,6 +35,7 @@ from db import (
     list_projects_admin,
     get_shift_assignments,
     list_shifts_admin,
+    get_shift_report,
     list_risky_assignments,
     format_date_ru,
 )
@@ -88,6 +89,7 @@ def _admin_monitoring_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="📊 Метрики", callback_data="admin_metrics")],
+            [InlineKeyboardButton(text="🧾 Отчёты по сменам", callback_data="admin_shift_reports")],
             [InlineKeyboardButton(text="📡 Статус выхода на смену", callback_data="admin_shift_statuses")],
             [InlineKeyboardButton(text="🚨 Рисковые смены (дашборд)", callback_data="admin_risk_dashboard")],
             [InlineKeyboardButton(text="📝 Лог действий", callback_data="admin_logs")],
@@ -128,6 +130,12 @@ def _admin_service_keyboard() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="🧾 Статус БД", callback_data="admin_db_status")],
             [InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back")],
         ]
+    )
+
+
+def _cancel_flow_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_flow")]]
     )
 
 
@@ -249,6 +257,101 @@ async def admin_metrics(callback: types.CallbackQuery):
         ),
     )
     await callback.answer()
+
+
+def _render_admin_shift_report_text(shift_id: int, report: dict) -> str:
+    shift = report.get("shift")
+    assignments = report.get("assignments") or []
+    tasks = report.get("tasks") or []
+    if not shift:
+        return "Смена не найдена."
+    text = (
+        f"📊 Отчёт по смене #{shift_id}\n\n"
+        f"📆 {format_date_ru(str(shift[2]))} | {shift[3]}-{shift[4]}\n"
+        f"📍 {shift[5] or '—'}\n"
+        f"💰 Ставка: {shift[6]} ₽/ч\n"
+        f"Статус смены: {shift[7]}\n\n"
+    )
+    if assignments:
+        total_pay = 0.0
+        text += "👥 Исполнители:\n"
+        for a in assignments:
+            name = str(a[-2] or a[2])
+            st = str(a[3] or "")
+            hours = float(a[9] or 0)
+            pay = float(a[10] or 0)
+            total_pay += pay
+            text += f"• {name}: {st}, {hours:.1f} ч, {pay:.0f} ₽\n"
+        text += f"\n💰 Итого выплата: {total_pay:.0f} ₽\n"
+    else:
+        text += "👥 Исполнителей на смене не найдено.\n"
+    done_tasks = sum(1 for t in tasks if str(t[5] or "") == "completed")
+    text += f"\n📋 Задачи: всего {len(tasks)}, выполнено {done_tasks}"
+    return text
+
+
+@router.callback_query(F.data == "admin_shift_reports")
+@admin_only
+async def admin_shift_reports(callback: types.CallbackQuery):
+    shifts = list_shifts_admin(30)
+    if not shifts:
+        await callback.message.edit_text(
+            "🧾 Отчётов пока нет: смены не созданы.",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back")]]
+            ),
+        )
+        await callback.answer()
+        return
+    rows = []
+    text = "🧾 Отчёты по сменам\n\nВыберите смену:\n"
+    for s in shifts:
+        sid, shift_date, st, et, project_name = s
+        text += f"• #{sid} {format_date_ru(str(shift_date))} {st}-{et} | {project_name}\n"
+        rows.append([InlineKeyboardButton(text=f"Отчёт по смене #{sid}", callback_data=f"admin_shift_report_{sid}")])
+    rows.append([InlineKeyboardButton(text="🔙 Назад", callback_data="admin_menu_monitoring")])
+    await callback.message.edit_text(
+        text[:3900],
+        parse_mode=None,
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("admin_shift_report_"))
+@admin_only
+async def admin_shift_report_one(callback: types.CallbackQuery):
+    raw = callback.data.replace("admin_shift_report_", "")
+    if not raw.isdigit():
+        await callback.answer()
+        return
+    shift_id = int(raw)
+    report = get_shift_report(shift_id)
+    text = _render_admin_shift_report_text(shift_id, report)
+    await callback.message.edit_text(
+        text[:3900],
+        parse_mode=None,
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="📤 Отправить в чат", callback_data=f"admin_shift_report_send_{shift_id}")],
+                [InlineKeyboardButton(text="🔙 К отчётам", callback_data="admin_shift_reports")],
+            ]
+        ),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("admin_shift_report_send_"))
+@admin_only
+async def admin_shift_report_send(callback: types.CallbackQuery):
+    raw = callback.data.replace("admin_shift_report_send_", "")
+    if not raw.isdigit():
+        await callback.answer()
+        return
+    shift_id = int(raw)
+    text = _render_admin_shift_report_text(shift_id, get_shift_report(shift_id))
+    await callback.message.answer(text[:3900], parse_mode=None)
+    await callback.answer("Отчёт отправлен ниже.", show_alert=True)
 
 
 def _risk_filter_keyboard(current: str) -> InlineKeyboardMarkup:
@@ -884,10 +987,11 @@ async def admin_create_shift_form(callback: types.CallbackQuery, state: FSMConte
     await state.update_data(shift_project_id=project_id)
     await state.set_state(ShiftCreation.date)
     await callback.message.edit_text(
-        "📅 *Создание смены (шаг 1/5)*\n\n"
+        "📅 *Создание смены (шаг 1/7)*\n\n"
         "Введите дату в формате `ДД.ММ.ГГГГ`.\n"
         "Пример: `15.05.2026`",
         parse_mode=None,
+        reply_markup=_cancel_flow_keyboard(),
     )
     await callback.answer()
 
@@ -920,13 +1024,18 @@ async def admin_create_shift_date(message: types.Message, state: FSMContext):
 
         normalize_shift_date(raw)
     except Exception:
-        await message.answer("❌ Неверная дата. Используйте формат `ДД.ММ.ГГГГ`, например `15.05.2026`.", parse_mode=None)
+        await message.answer(
+            "❌ Неверная дата. Используйте формат `ДД.ММ.ГГГГ`, например `15.05.2026`.",
+            parse_mode=None,
+            reply_markup=_cancel_flow_keyboard(),
+        )
         return
     await state.update_data(shift_date=raw)
     await state.set_state(ShiftCreation.start_time)
     await message.answer(
-        "⏰ *Шаг 2/5*\nВведите время начала в формате `ЧЧ:ММ`.\nПример: `10:00`",
+        "⏰ *Шаг 2/7*\nВведите время начала в формате `ЧЧ:ММ`.\nПример: `10:00`",
         parse_mode=None,
+        reply_markup=_cancel_flow_keyboard(),
     )
 
 
@@ -935,13 +1044,18 @@ async def admin_create_shift_date(message: types.Message, state: FSMContext):
 async def admin_create_shift_start_time(message: types.Message, state: FSMContext):
     start_time = (message.text or "").strip()
     if not _is_hhmm(start_time):
-        await message.answer("❌ Неверный формат времени. Пример: `10:00`", parse_mode=None)
+        await message.answer(
+            "❌ Неверный формат времени. Пример: `10:00`",
+            parse_mode=None,
+            reply_markup=_cancel_flow_keyboard(),
+        )
         return
     await state.update_data(start_time=start_time)
     await state.set_state(ShiftCreation.end_time)
     await message.answer(
         "⏱ *Шаг 3/7*\nВведите время окончания в формате `ЧЧ:ММ`.\nПример: `18:00`",
         parse_mode=None,
+        reply_markup=_cancel_flow_keyboard(),
     )
 
 
@@ -950,16 +1064,26 @@ async def admin_create_shift_start_time(message: types.Message, state: FSMContex
 async def admin_create_shift_end_time(message: types.Message, state: FSMContext):
     end_time = (message.text or "").strip()
     if not _is_hhmm(end_time):
-        await message.answer("❌ Неверный формат времени. Пример: `18:00`", parse_mode=None)
+        await message.answer(
+            "❌ Неверный формат времени. Пример: `18:00`",
+            parse_mode=None,
+            reply_markup=_cancel_flow_keyboard(),
+        )
         return
     data = await state.get_data()
     start_time = (data.get("start_time") or "").strip()
     if start_time == end_time:
-        await message.answer("❌ Время окончания не должно совпадать со временем начала.")
+        await message.answer(
+            "❌ Время окончания не должно совпадать со временем начала.",
+            reply_markup=_cancel_flow_keyboard(),
+        )
         return
     await state.update_data(end_time=end_time)
     await state.set_state(ShiftCreation.location)
-    await message.answer("📍 *Шаг 4/7*\nВведите адрес/локацию смены.")
+    await message.answer(
+        "📍 *Шаг 4/7*\nВведите адрес/локацию смены.",
+        reply_markup=_cancel_flow_keyboard(),
+    )
 
 
 @router.message(ShiftCreation.location)
@@ -967,7 +1091,10 @@ async def admin_create_shift_end_time(message: types.Message, state: FSMContext)
 async def admin_create_shift_location(message: types.Message, state: FSMContext):
     location = (message.text or "").strip()
     if len(location) < 5:
-        await message.answer("❌ Слишком короткий адрес. Введите локацию подробнее.")
+        await message.answer(
+            "❌ Слишком короткий адрес. Введите локацию подробнее.",
+            reply_markup=_cancel_flow_keyboard(),
+        )
         return
     await state.update_data(location=location)
     await state.set_state(ShiftCreation.coords)
@@ -976,6 +1103,7 @@ async def admin_create_shift_location(message: types.Message, state: FSMContext)
         "Введите координаты площадки в формате `55.7522,37.6156`.\n"
         "Если контроль гео не нужен, отправьте `0`.",
         parse_mode=None,
+        reply_markup=_cancel_flow_keyboard(),
     )
 
 
@@ -989,6 +1117,7 @@ async def admin_create_shift_coords(message: types.Message, state: FSMContext):
         await message.answer(
             "❌ Неверный формат координат. Пример: `55.7522,37.6156` или `0` чтобы пропустить.",
             parse_mode=None,
+            reply_markup=_cancel_flow_keyboard(),
         )
         return
     if coords is None:
@@ -997,6 +1126,7 @@ async def admin_create_shift_coords(message: types.Message, state: FSMContext):
         await message.answer(
             "💰 *Шаг 7/7*\nВведите ставку в рублях за час (только число).\nПример: `500`",
             parse_mode=None,
+            reply_markup=_cancel_flow_keyboard(),
         )
         return
     await state.update_data(expected_lat=coords[0], expected_lng=coords[1])
@@ -1004,6 +1134,7 @@ async def admin_create_shift_coords(message: types.Message, state: FSMContext):
     await message.answer(
         "📐 *Шаг 6/7*\nВведите радиус допуска в метрах (например `300`).",
         parse_mode=None,
+        reply_markup=_cancel_flow_keyboard(),
     )
 
 
@@ -1012,17 +1143,25 @@ async def admin_create_shift_coords(message: types.Message, state: FSMContext):
 async def admin_create_shift_radius(message: types.Message, state: FSMContext):
     raw = (message.text or "").strip()
     if not raw.isdigit():
-        await message.answer("❌ Радиус должен быть числом, например `300`.", parse_mode=None)
+        await message.answer(
+            "❌ Радиус должен быть числом, например `300`.",
+            parse_mode=None,
+            reply_markup=_cancel_flow_keyboard(),
+        )
         return
     radius = int(raw)
     if radius < 30 or radius > 3000:
-        await message.answer("❌ Радиус должен быть в диапазоне 30..3000 метров.")
+        await message.answer(
+            "❌ Радиус должен быть в диапазоне 30..3000 метров.",
+            reply_markup=_cancel_flow_keyboard(),
+        )
         return
     await state.update_data(checkin_radius_m=radius)
     await state.set_state(ShiftCreation.rate)
     await message.answer(
         "💰 *Шаг 7/7*\nВведите ставку в рублях за час (только число).\nПример: `500`",
         parse_mode=None,
+        reply_markup=_cancel_flow_keyboard(),
     )
 
 
@@ -1031,11 +1170,18 @@ async def admin_create_shift_radius(message: types.Message, state: FSMContext):
 async def admin_create_shift_finish(message: types.Message, state: FSMContext):
     rate_raw = (message.text or "").strip()
     if not rate_raw.isdigit():
-        await message.answer("❌ Ставка должна быть числом, например `500`.", parse_mode=None)
+        await message.answer(
+            "❌ Ставка должна быть числом, например `500`.",
+            parse_mode=None,
+            reply_markup=_cancel_flow_keyboard(),
+        )
         return
     rate = int(rate_raw)
     if rate <= 0 or rate > 10000:
-        await message.answer("❌ Ставка должна быть в диапазоне 1..10000.")
+        await message.answer(
+            "❌ Ставка должна быть в диапазоне 1..10000.",
+            reply_markup=_cancel_flow_keyboard(),
+        )
         return
     try:
         data = await state.get_data()
@@ -1073,11 +1219,17 @@ async def admin_create_shift_finish(message: types.Message, state: FSMContext):
             f"Координаты/геоконтроль: {coords_line}\n"
             f"Ставка: `{rate}` ₽/час",
             parse_mode=None,
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(text="👥 Назначить исполнителей", callback_data=f"assign_shift_{shift_id}")],
+                    [InlineKeyboardButton(text="🎯 Сводка смены", callback_data=f"shift_hub_ad_{shift_id}")],
+                    [InlineKeyboardButton(text="🗓 Управление сменами", callback_data="admin_shift_manage")],
+                ]
+            ),
         )
     except Exception as e:
         await message.answer(f"❌ Ошибка: {e}")
     await state.clear()
-    await admin_panel(message)
 
 
 @router.callback_query(F.data == "admin_assign")
@@ -1113,19 +1265,31 @@ async def admin_assign_list_shifts(callback: types.CallbackQuery):
 @admin_only
 async def admin_assign_list_workers(callback: types.CallbackQuery):
     shift_id = int(callback.data.replace("assign_shift_", ""))
-    workers = get_workers_assignable()
+    # Важно на будущее: при 100+ / 1000+ исполнителях нужен поиск/пагинация/фильтры,
+    # иначе инлайн-список станет непригодным и будет тормозить UX админа.
+    workers = get_workers("approved")
     if not workers:
-        await callback.message.edit_text("❌ Нет доступных исполнителей (кроме `rejected`).", parse_mode=None)
+        await callback.message.edit_text(
+            "❌ Нет одобренных исполнителей для назначения.",
+            parse_mode=None,
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text="🔙 Назад", callback_data="admin_shift_manage")]]
+            ),
+        )
         await callback.answer()
         return
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text=f"{w[1]} ({w[3]}) [{w[4] or 'new'}]", callback_data=f"do_assign_{shift_id}_{w[0]}")]
+            [InlineKeyboardButton(text=f"{w[1]} ({w[3]}) [{w[4] or 'approved'}]", callback_data=f"do_assign_{shift_id}_{w[0]}")]
             for w in workers
         ]
-        + [[InlineKeyboardButton(text="🔙 Назад", callback_data="admin_assign")]]
+        + [[InlineKeyboardButton(text="🔙 Назад", callback_data="admin_shift_manage")]]
     )
-    await callback.message.edit_text("👥 Выберите исполнителя:", reply_markup=keyboard)
+    await callback.message.edit_text(
+        "👥 Выберите исполнителя\n\nСейчас показываются только исполнители со статусом `approved`.",
+        parse_mode=None,
+        reply_markup=keyboard,
+    )
     await callback.answer()
 
 
@@ -1149,8 +1313,18 @@ async def admin_do_assign(callback: types.CallbackQuery):
         )
     except Exception as e:
         logger.warning("admin_do_assign notify worker_id=%s shift_id=%s: %s", worker_id, shift_id, e, exc_info=True)
-    await callback.message.edit_text(f"✅ Исполнитель `{worker_id}` назначен на смену #{shift_id}")
-    await callback.answer()
+    await callback.message.edit_text(
+        f"✅ Исполнитель `{worker_id}` назначен на смену #{shift_id}",
+        parse_mode=None,
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="➕ Назначить ещё", callback_data=f"assign_shift_{shift_id}")],
+                [InlineKeyboardButton(text="🎯 Сводка смены", callback_data=f"shift_hub_ad_{shift_id}")],
+                [InlineKeyboardButton(text="🗓 Управление сменами", callback_data="admin_shift_manage")],
+            ]
+        ),
+    )
+    await callback.answer("Исполнитель назначен.", show_alert=True)
 
 
 @router.callback_query(F.data == "admin_shift_manage")

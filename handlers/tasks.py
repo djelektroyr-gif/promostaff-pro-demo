@@ -35,6 +35,22 @@ logger = logging.getLogger(__name__)
 T_STATUS = 5
 
 
+def _task_flow_actions_keyboard(shift_id: int, is_admin: bool) -> InlineKeyboardMarkup:
+    if is_admin:
+        rows = [
+            [InlineKeyboardButton(text="🎯 Сводка смены", callback_data=f"shift_hub_ad_{shift_id}")],
+            [InlineKeyboardButton(text="📝 Ещё задача", callback_data=f"add_task_{shift_id}")],
+            [InlineKeyboardButton(text="🗓 Управление сменами", callback_data="admin_shift_manage")],
+        ]
+    else:
+        rows = [
+            [InlineKeyboardButton(text="📅 Открыть эту смену", callback_data=f"shift_detail_{shift_id}")],
+            [InlineKeyboardButton(text="📝 Ещё одна задача", callback_data="client_add_task_pick_shift")],
+            [InlineKeyboardButton(text="🏠 Главное меню", callback_data="main_menu")],
+        ]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 def _assignment_worker_ids(assignments) -> list[int]:
     seen: set[int] = set()
     out: list[int] = []
@@ -458,7 +474,13 @@ async def add_task_start(callback: types.CallbackQuery, state: FSMContext):
     )
     if is_admin:
         intro += "\n\nВы администратор — задачу увидят выбранные исполнители, как если бы её поставил заказчик."
-    await callback.message.edit_text(intro, parse_mode=None)
+    await callback.message.edit_text(
+        intro,
+        parse_mode=None,
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_flow")]]
+        ),
+    )
     await state.set_state(TaskCreation.title)
     await callback.answer()
 
@@ -470,6 +492,9 @@ async def task_title_received(message: types.Message, state: FSMContext):
         "📋 Шаг 3 из 4 — описание\n\n"
         "Напишите подробности одним сообщением. Если подробностей нет — отправьте один символ: -",
         parse_mode=None,
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_flow")]]
+        ),
     )
     await state.set_state(TaskCreation.description)
 
@@ -499,6 +524,7 @@ async def task_description_received(message: types.Message, state: FSMContext):
         [InlineKeyboardButton(text="👥 Выбрать нескольких", callback_data="assign_mode_multi")],
         [InlineKeyboardButton(text="👤 Одному человеку", callback_data="assign_mode_one")],
         [InlineKeyboardButton(text="📌 Пока без исполнителя (черновик)", callback_data="assign_task_skip")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_flow")],
     ]
     await message.answer(
         "📋 Шаг 4 из 4 — кому отправить задачу\n\n"
@@ -534,20 +560,15 @@ async def assign_mode_all_handler(callback: types.CallbackQuery, state: FSMConte
         description=description,
         worker_task_pairs=pairs,
     )
+    is_admin = is_admin_user(int(callback.from_user.id))
     await callback.message.edit_text(
         f"✅ Готово! Создано задач: {len(pairs)} (каждому на смене).\n\n📋 {title}\n\n"
         "Исполнители получили уведомление. Вы можете вернуться в карточку смены или поставить ещё одну задачу.",
         parse_mode=None,
-        reply_markup=InlineKeyboardMarkup(
-            inline_keyboard=[
-                [InlineKeyboardButton(text="📅 Открыть эту смену", callback_data=f"shift_detail_{shift_id}")],
-                [InlineKeyboardButton(text="📝 Ещё одна задача", callback_data="client_add_task_pick_shift")],
-                [InlineKeyboardButton(text="🏠 Главное меню", callback_data="main_menu")],
-            ]
-        ),
+        reply_markup=_task_flow_actions_keyboard(shift_id, is_admin),
     )
     await state.clear()
-    await callback.answer()
+    await callback.answer(f"✅ Задача отправлена: {len(pairs)} исполнителям.", show_alert=True)
 
 
 @router.callback_query(TaskCreation.choose_assignment, F.data == "assign_mode_one")
@@ -561,6 +582,7 @@ async def assign_mode_one_handler(callback: types.CallbackQuery, state: FSMConte
         name = assignment_join_worker_name(a)
         keyboard_rows.append([InlineKeyboardButton(text=name[:40], callback_data=f"assign_task_{wid}")])
     keyboard_rows.append([InlineKeyboardButton(text="Без исполнителя", callback_data="assign_task_skip")])
+    keyboard_rows.append([InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_flow")])
     await callback.message.edit_text(
         "👤 Кому одному?\n\nНажмите на фамилию исполнителя. «Без исполнителя» — если пока только фиксируете задачу в системе.",
         parse_mode=None,
@@ -594,19 +616,15 @@ async def assign_skip_from_choice(callback: types.CallbackQuery, state: FSMConte
     title = data["task_title"]
     description = data.get("task_description", "")
     create_task(shift_id, title, description, None)
+    is_admin = is_admin_user(int(callback.from_user.id))
     await callback.message.edit_text(
         f"📌 Задача сохранена без исполнителя (никому не ушло уведомление).\n\n📋 {title}\n\n"
         "Позже можно создать задачу заново и назначить людей.",
         parse_mode=None,
-        reply_markup=InlineKeyboardMarkup(
-            inline_keyboard=[
-                [InlineKeyboardButton(text="📅 К смене", callback_data=f"shift_detail_{shift_id}")],
-                [InlineKeyboardButton(text="📝 Новая задача", callback_data="client_add_task_pick_shift")],
-            ]
-        ),
+        reply_markup=_task_flow_actions_keyboard(shift_id, is_admin),
     )
     await state.clear()
-    await callback.answer()
+    await callback.answer("✅ Задача сохранена как черновик.", show_alert=True)
 
 
 @router.callback_query(TaskCreation.pick_workers, F.data.startswith("assign_toggle_"))
@@ -649,19 +667,14 @@ async def assign_multi_done(callback: types.CallbackQuery, state: FSMContext):
         description=description,
         worker_task_pairs=pairs,
     )
+    is_admin = is_admin_user(int(callback.from_user.id))
     await callback.message.edit_text(
         f"✅ Готово! Создано задач: {len(pairs)}.\n\n📋 {title}",
         parse_mode=None,
-        reply_markup=InlineKeyboardMarkup(
-            inline_keyboard=[
-                [InlineKeyboardButton(text="📅 Открыть смену", callback_data=f"shift_detail_{shift_id}")],
-                [InlineKeyboardButton(text="📝 Ещё задача", callback_data="client_add_task_pick_shift")],
-                [InlineKeyboardButton(text="🏠 Меню", callback_data="main_menu")],
-            ]
-        ),
+        reply_markup=_task_flow_actions_keyboard(shift_id, is_admin),
     )
     await state.clear()
-    await callback.answer()
+    await callback.answer(f"✅ Задача отправлена: {len(pairs)} исполнителям.", show_alert=True)
 
 
 @router.callback_query(TaskCreation.pick_workers, F.data == "assign_multi_cancel")
@@ -690,16 +703,11 @@ async def task_assign_received(callback: types.CallbackQuery, state: FSMContext)
 
     task_id = create_task(shift_id, title, description, worker_id)
 
+    is_admin = is_admin_user(int(callback.from_user.id))
     await callback.message.edit_text(
         f"✅ Задача создана!\n\n📋 {title}",
         parse_mode=None,
-        reply_markup=InlineKeyboardMarkup(
-            inline_keyboard=[
-                [InlineKeyboardButton(text="📅 К смене", callback_data=f"shift_detail_{shift_id}")],
-                [InlineKeyboardButton(text="📝 Ещё задача", callback_data="client_add_task_pick_shift")],
-                [InlineKeyboardButton(text="🏠 Меню", callback_data="main_menu")],
-            ]
-        ),
+        reply_markup=_task_flow_actions_keyboard(shift_id, is_admin),
     )
 
     if worker_id:
@@ -714,7 +722,10 @@ async def task_assign_received(callback: types.CallbackQuery, state: FSMContext)
         )
 
     await state.clear()
-    await callback.answer()
+    if worker_id:
+        await callback.answer("✅ Задача отправлена исполнителю.", show_alert=True)
+    else:
+        await callback.answer("✅ Задача сохранена без исполнителя.", show_alert=True)
 
 
 @router.callback_query(F.data.startswith("tasks_"))
@@ -768,6 +779,9 @@ async def complete_task_start(callback: types.CallbackQuery, state: FSMContext):
         "📝 ОТЧЁТ\n\nСначала текстом: что сделано (или - без комментария).\n"
         "Следующим сообщением бот попросит фото-подтверждение.",
         parse_mode=None,
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_flow")]]
+        ),
     )
     await state.set_state(TaskCompletion.report_text)
     await callback.answer()
@@ -788,7 +802,10 @@ async def task_report_text_received(message: types.Message, state: FSMContext):
     await state.update_data(report_text=report_text)
     await message.answer(
         "📸 Отправьте фото, как сделано (заказчик увидит его в уведомлении). "
-        "Если фото совсем нельзя — отправьте `0`."
+        "Если фото совсем нельзя — отправьте `0`.",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_flow")]]
+        ),
     )
     await state.set_state(TaskCompletion.report_photo)
 

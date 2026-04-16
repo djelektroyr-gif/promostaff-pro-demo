@@ -4,7 +4,7 @@ from __future__ import annotations
 import logging
 
 from aiogram import Router, F, types
-from aiogram.filters import Command
+from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
@@ -199,6 +199,23 @@ async def show_main_menu(callback: types.CallbackQuery):
     await callback.answer()
 
 
+@router.callback_query(StateFilter("*"), F.data == "cancel_flow")
+async def cancel_any_flow(callback: types.CallbackQuery, state: FSMContext):
+    await state.clear()
+    await show_main_menu(callback)
+
+
+@router.message(StateFilter("*"), Command("cancel"))
+async def cancel_any_flow_cmd(message: types.Message, state: FSMContext):
+    await state.clear()
+    await message.answer(
+        "✅ Действие отменено.",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="🏠 В главное меню", callback_data="main_menu")]]
+        ),
+    )
+
+
 @router.callback_query(F.data == "client_menu_overview")
 async def client_menu_overview(callback: types.CallbackQuery):
     if not get_client(callback.from_user.id):
@@ -291,7 +308,7 @@ async def fsm_or_start_hint(message: types.Message, state: FSMContext):
     st = await state.get_state()
     if st:
         await message.answer(
-            em("Бот ждёт от вас ввод по текущему шагу. Завершите шаг или отправьте /start для сброса и главного меню."),
+            em("Бот ждёт ввод по текущему шагу. Завершите шаг, нажмите «❌ Отмена» или отправьте /cancel."),
             parse_mode=PARSE_MODE_TELEGRAM,
         )
         return
