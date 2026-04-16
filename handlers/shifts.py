@@ -888,60 +888,69 @@ async def checkin_geo_wrong_payload(message: types.Message):
 
 @router.message(F.photo, CheckinFlow.photo)
 async def checkin_photo_received(message: types.Message, state: FSMContext):
-    photo_id = message.photo[-1].file_id
-    data = await state.get_data()
-    shift_id = data["checkin_shift_id"]
-    shift_row = get_shift(int(shift_id))
-    exp_lat, exp_lng, _ = _shift_geo_limits(shift_row)
-    lat = data.get("checkin_lat")
-    lng = data.get("checkin_lng")
-    if exp_lat is not None and exp_lng is not None:
-        ok = do_checkin(
-            int(shift_id),
-            message.from_user.id,
-            photo_id,
-            float(lat) if lat is not None else None,
-            float(lng) if lng is not None else None,
-            1,
-        )
-    else:
-        ok = do_checkin(
-            int(shift_id),
-            message.from_user.id,
-            photo_id,
-            float(lat) if lat is not None else None,
-            float(lng) if lng is not None else None,
-            None,
-        )
-    if not ok:
+    try:
+        photo_id = message.photo[-1].file_id
+        data = await state.get_data()
+        shift_id = data["checkin_shift_id"]
+        shift_row = get_shift(int(shift_id))
+        exp_lat, exp_lng, _ = _shift_geo_limits(shift_row)
+        lat = data.get("checkin_lat")
+        lng = data.get("checkin_lng")
+        if exp_lat is not None and exp_lng is not None:
+            ok = do_checkin(
+                int(shift_id),
+                message.from_user.id,
+                photo_id,
+                float(lat) if lat is not None else None,
+                float(lng) if lng is not None else None,
+                1,
+            )
+        else:
+            ok = do_checkin(
+                int(shift_id),
+                message.from_user.id,
+                photo_id,
+                float(lat) if lat is not None else None,
+                float(lng) if lng is not None else None,
+                None,
+            )
+        if not ok:
+            await message.answer(
+                "❌ Чек-ин не сохранился: назначение не найдено или смена уже в другом состоянии. "
+                "Откройте смену из «Мои смены» и попробуйте снова."
+            )
+            await state.clear()
+            return
+        shift_owner = get_shift_with_owner(int(shift_id))
+        if shift_owner:
+            dt_start = _shift_start(shift_owner)
+            if now_local_naive() > dt_start:
+                mark_assignment_event_by_shift_worker(int(shift_id), message.from_user.id, "late_checkin_notified_at")
+                delay_min = int((now_local_naive() - dt_start).total_seconds() // 60)
+                late_text = (
+                    f"⚠️ Исполнитель {message.from_user.full_name} отметил чек-ин по смене #{shift_id} "
+                    f"с опозданием на {max(delay_min, 1)} мин."
+                )
+                try:
+                    await send_all_admins(message.bot, late_text)
+                    client_id = shift_owner[7]
+                    if client_id:
+                        await message.bot.send_message(int(client_id), late_text)
+                except Exception as e:
+                    logger.warning("late checkin notify shift_id=%s: %s", shift_id, e, exc_info=True)
         await message.answer(
-            "❌ Чек-ин не сохранился: назначение не найдено или смена уже в другом состоянии. "
-            "Откройте смену из «Мои смены» и попробуйте снова."
+            "✅ " + bold("Чек-ин выполнен!") + " " + em("Удачной смены! 🚀"),
+            parse_mode=PARSE_MODE_TELEGRAM,
         )
         await state.clear()
-        return
-    shift_owner = get_shift_with_owner(int(shift_id))
-    if shift_owner:
-        dt_start = _shift_start(shift_owner)
-        if now_local_naive() > dt_start:
-            mark_assignment_event_by_shift_worker(int(shift_id), message.from_user.id, "late_checkin_notified_at")
-            delay_min = int((now_local_naive() - dt_start).total_seconds() // 60)
-            late_text = (
-                f"⚠️ Исполнитель {message.from_user.full_name} отметил чек-ин по смене #{shift_id} "
-                f"с опозданием на {max(delay_min, 1)} мин."
-            )
-            try:
-                await send_all_admins(message.bot, late_text)
-                client_id = shift_owner[7]
-                if client_id:
-                    await message.bot.send_message(int(client_id), late_text)
-            except Exception as e:
-                logger.warning("late checkin notify shift_id=%s: %s", shift_id, e, exc_info=True)
-    await message.answer(
-        "✅ " + bold("Чек-ин выполнен!") + " " + em("Удачной смены! 🚀"),
-        parse_mode=PARSE_MODE_TELEGRAM,
-    )
-    await state.clear()
+    except Exception:
+        logger.exception(
+            "checkin_photo_received failed user_id=%s state=%s",
+            message.from_user.id,
+            await state.get_data(),
+        )
+        await message.answer("❌ Не удалось завершить чек-ин из-за внутренней ошибки. Попробуйте ещё раз.")
+        await state.clear()
 
 
 @router.message(CheckinFlow.photo)
@@ -1021,21 +1030,40 @@ async def checkout_geo_wrong_payload(message: types.Message):
 
 @router.message(F.photo, CheckoutFlow.photo)
 async def checkout_photo_received(message: types.Message, state: FSMContext):
-    photo_id = message.photo[-1].file_id
-    data = await state.get_data()
-    shift_id = data["checkout_shift_id"]
-    ok = do_checkout(int(shift_id), message.from_user.id, photo_id)
-    if not ok:
+    try:
+        photo_id = message.photo[-1].file_id
+        data = await state.get_data()
+        shift_id = data["checkout_shift_id"]
+        lat = data.get("checkout_lat")
+        lng = data.get("checkout_lng")
+        # Защита от "залипшего" состояния: без шага гео чек-аут не выполняем.
+        if lat is None or lng is None:
+            await state.set_state(CheckoutFlow.geo)
+            await message.answer(
+                "⚠️ Для чек-аута сначала отправьте геолокацию (скрепка 📎 -> Локация), затем фото.",
+                parse_mode=None,
+            )
+            return
+        ok = do_checkout(int(shift_id), message.from_user.id, photo_id)
+        if not ok:
+            await message.answer(
+                "❌ Чек-аут не сохранился. Убедитесь, что вы на смене (статус «На смене») и открыли чек-аут из карточки."
+            )
+            await state.clear()
+            return
         await message.answer(
-            "❌ Чек-аут не сохранился. Убедитесь, что вы на смене (статус «На смене») и открыли чек-аут из карточки."
+            "✅ " + bold("Смена завершена!") + " " + em("Спасибо за работу!"),
+            parse_mode=PARSE_MODE_TELEGRAM,
         )
         await state.clear()
-        return
-    await message.answer(
-        "✅ " + bold("Смена завершена!") + " " + em("Спасибо за работу!"),
-        parse_mode=PARSE_MODE_TELEGRAM,
-    )
-    await state.clear()
+    except Exception:
+        logger.exception(
+            "checkout_photo_received failed user_id=%s state=%s",
+            message.from_user.id,
+            await state.get_data(),
+        )
+        await message.answer("❌ Не удалось завершить чек-аут из-за внутренней ошибки. Попробуйте ещё раз.")
+        await state.clear()
 
 
 @router.message(F.text, CheckoutFlow.photo)
