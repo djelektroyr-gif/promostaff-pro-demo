@@ -177,7 +177,7 @@ def format_shift_hub(
     tasks = rep.get("tasks") or []
 
     lines = [
-        f"{W} *\u0413\u043b\u0430\u0432\u043d\u043e\u0435 \u043f\u043e \u0441\u043c\u0435\u043d\u0435 #{shift_id}*",
+        f"{W} \u0413\u043b\u0430\u0432\u043d\u043e\u0435 \u043f\u043e \u0441\u043c\u0435\u043d\u0435 #{shift_id}",
         f"\u0414\u0430\u0442\u0430: {format_date_ru(shift_date)} {st_t}\u2013{en_t}",
         f"\u041b\u043e\u043a\u0430\u0446\u0438\u044f: {loc}",
     ]
@@ -201,8 +201,8 @@ def format_shift_hub(
             shift_has_fence=shift_has_fence,
         )
 
-        lines.append(f"{light} *{name}* \u2014 {reason}")
-        lines.append(f"   \u0441\u0442\u0430\u0442\u0443\u0441: `{st}` | {_geo_line(a, shift_has_fence)}")
+        lines.append(f"{light} {name} \u2014 {reason}")
+        lines.append(f"   \u0441\u0442\u0430\u0442\u0443\u0441: {st} | {_geo_line(a, shift_has_fence)}")
         lines.append(f"   \u043f\u043e\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0435\u043d\u0438\u0435: {_fmt_ts(a[4])}")
         lines.append(f"   \u0447\u0435\u043a-\u0438\u043d: {_fmt_ts(a[5])} | \u0447\u0435\u043a-\u0430\u0443\u0442: {_fmt_ts(a[7])}")
         if include_pay and st == "checked_out":
@@ -256,13 +256,13 @@ def format_shift_hub(
 
         ev.sort(key=_ts_key)
         if ev:
-            lines.append("   _\u0422\u0430\u0439\u043c\u043b\u0430\u0439\u043d:_")
+            lines.append("   \u0422\u0430\u0439\u043c\u043b\u0430\u0439\u043d:")
             for ts, label in ev:
                 lines.append(f"   \u2022 {_fmt_ts(ts)} \u2014 {label}")
         lines.append("")
 
     if tasks:
-        lines.append("*\u0417\u0430\u0434\u0430\u0447\u0438 \u043f\u043e \u0441\u043c\u0435\u043d\u0435:*")
+        lines.append("\u0417\u0430\u0434\u0430\u0447\u0438 \u043f\u043e \u0441\u043c\u0435\u043d\u0435:")
         for trow in tasks[:15]:
             tid = trow[0]
             title = trow[2]

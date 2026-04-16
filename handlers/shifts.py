@@ -1,4 +1,5 @@
 # handlers/shifts.py
+import logging
 import math
 from datetime import datetime
 from datetime import timedelta
@@ -40,11 +41,15 @@ from db import (
     set_assignment_checkin_geo_failed,
     format_date_ru,
 )
-from config import ADMIN_USER_ID
+from config import PARSE_MODE_TELEGRAM, is_admin_user
+from services.admin_broadcast import send_all_admins
+from services.text_utils import bold, escape_markdown as em
 from services.time_utils import now_local_naive, shift_start_end_local_naive
+from .telegram_edit import safe_edit_or_resend
 from states import CheckinFlow, CheckoutFlow, ShiftExtensionFlow, ClientMessageWorkerFlow
 
 router = Router()
+logger = logging.getLogger(__name__)
 
 # Статус в JOIN-строке assignments + workers всегда a[3]; ФИО — предпоследнее поле (a[-2]).
 A_STATUS = 3
@@ -117,11 +122,11 @@ async def show_my_shifts(callback: types.CallbackQuery):
     if client:
         shifts = list_shifts_for_client(user_id)
         if not shifts:
-            await callback.message.edit_text("📅 У вас пока нет смен.")
+            await safe_edit_or_resend(callback, "📅 У вас пока нет смен.")
             await callback.answer()
             return
 
-        text = "📅 *Ваши смены:*\n\n"
+        text = "📅 Ваши смены:\n\n"
         keyboard_rows = []
         for s in shifts:
             status_emoji = "🟢" if s[6] == "open" else "🔵" if s[6] == "in_progress" else "⚪"
@@ -137,16 +142,17 @@ async def show_my_shifts(callback: types.CallbackQuery):
             )
         keyboard_rows.append([InlineKeyboardButton(text="🔙 Назад", callback_data="main_menu")])
         keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
-        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="Markdown")
+        await safe_edit_or_resend(callback, text, reply_markup=keyboard, parse_mode=None)
+        await callback.answer()
 
     elif worker:
         shifts = list_shifts_for_worker(user_id)
         if not shifts:
-            await callback.message.edit_text("📅 У вас пока нет назначенных смен.")
+            await safe_edit_or_resend(callback, "📅 У вас пока нет назначенных смен.")
             await callback.answer()
             return
 
-        text = "📅 *Ваши смены:*\n\n"
+        text = "📅 Ваши смены:\n\n"
         keyboard_rows = []
         for s in shifts:
             status_text = {
@@ -167,13 +173,15 @@ async def show_my_shifts(callback: types.CallbackQuery):
             )
         keyboard_rows.append([InlineKeyboardButton(text="🔙 Назад", callback_data="main_menu")])
         keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
-        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="Markdown")
+        await safe_edit_or_resend(callback, text, reply_markup=keyboard, parse_mode=None)
+        await callback.answer()
 
     else:
-        await callback.message.edit_text(
-            "Не удалось определить роль. Нажмите /start и завершите регистрацию."
+        await safe_edit_or_resend(
+            callback,
+            "Не удалось определить роль. Нажмите /start и завершите регистрацию.",
         )
-    await callback.answer()
+        await callback.answer()
 
 
 @router.callback_query(F.data == "client_shift_statuses")
@@ -184,7 +192,7 @@ async def client_shift_statuses(callback: types.CallbackQuery):
         return
     shifts = list_shifts_for_client(user_id)
     if not shifts:
-        await callback.message.edit_text(
+        await safe_edit_or_resend(callback, 
             "📡 Пока нет смен для контроля подтверждений.",
             reply_markup=InlineKeyboardMarkup(
                 inline_keyboard=[[InlineKeyboardButton(text="🔙 Назад", callback_data="main_menu")]]
@@ -193,15 +201,15 @@ async def client_shift_statuses(callback: types.CallbackQuery):
         await callback.answer()
         return
     rows = []
-    text = "📡 *Статус выхода на смену*\n\nВыберите смену:\n"
+    text = "📡 Статус выхода на смену\n\nВыберите смену:\n"
     for s in shifts[:30]:
         sid, shift_date, st, et, _loc, project_name, _status = s
         text += f"• #{sid} {format_date_ru(shift_date)} {st}-{et} | {project_name}\n"
         rows.append([InlineKeyboardButton(text=f"Смена #{sid}", callback_data=f"shift_status_view_{sid}")])
     rows.append([InlineKeyboardButton(text="🔙 Назад", callback_data="main_menu")])
-    await callback.message.edit_text(
+    await safe_edit_or_resend(callback, 
         text,
-        parse_mode="Markdown",
+        parse_mode=None,
         reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
     )
     await callback.answer()
@@ -209,12 +217,12 @@ async def client_shift_statuses(callback: types.CallbackQuery):
 
 @router.callback_query(F.data == "admin_shift_statuses")
 async def admin_shift_statuses(callback: types.CallbackQuery):
-    if callback.from_user.id != int(ADMIN_USER_ID):
+    if not is_admin_user(callback.from_user.id):
         await callback.answer("Нет доступа.", show_alert=True)
         return
     shifts = list_open_shifts_admin(50)
     if not shifts:
-        await callback.message.edit_text(
+        await safe_edit_or_resend(callback, 
             "📡 Нет открытых смен.",
             reply_markup=InlineKeyboardMarkup(
                 inline_keyboard=[[InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back")]]
@@ -223,15 +231,15 @@ async def admin_shift_statuses(callback: types.CallbackQuery):
         await callback.answer()
         return
     rows = []
-    text = "📡 *Статус выхода на смену (админ)*\n\nВыберите смену:\n"
+    text = "📡 Статус выхода на смену (админ)\n\nВыберите смену:\n"
     for s in shifts:
         sid, shift_date, st, et, project_name, _status = s
         text += f"• #{sid} {format_date_ru(str(shift_date))} {st}-{et} | {project_name}\n"
         rows.append([InlineKeyboardButton(text=f"Смена #{sid}", callback_data=f"shift_status_view_{sid}")])
     rows.append([InlineKeyboardButton(text="🔙 В админ-панель", callback_data="admin_back")])
-    await callback.message.edit_text(
+    await safe_edit_or_resend(callback, 
         text,
-        parse_mode="Markdown",
+        parse_mode=None,
         reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
     )
     await callback.answer()
@@ -241,18 +249,18 @@ async def admin_shift_statuses(callback: types.CallbackQuery):
 async def shift_status_view(callback: types.CallbackQuery):
     shift_id = int(callback.data.replace("shift_status_view_", ""))
     user_id = callback.from_user.id
-    is_admin = user_id == int(ADMIN_USER_ID)
+    is_admin = is_admin_user(user_id)
     if not is_admin and (not get_client(user_id) or not client_owns_shift(user_id, shift_id)):
         await callback.answer("Нет доступа.", show_alert=True)
         return
     shift = get_shift(shift_id)
     if not shift:
-        await callback.message.edit_text("❌ Смена не найдена.")
+        await safe_edit_or_resend(callback, "❌ Смена не найдена.")
         await callback.answer()
         return
     assignments = get_shift_assignments(shift_id)
     text = (
-        f"📡 *Статус подтверждения по смене #{shift_id}*\n\n"
+        f"📡 Статус подтверждения по смене #{shift_id}\n\n"
         f"📆 {format_date_ru(shift[2])} {shift[3]}-{shift[4]}\n"
         f"📍 {shift[5]}\n\n"
     )
@@ -275,9 +283,9 @@ async def shift_status_view(callback: types.CallbackQuery):
     rows.append(
         [InlineKeyboardButton(text="🔙 Назад", callback_data="admin_shift_statuses" if is_admin else "client_shift_statuses")]
     )
-    await callback.message.edit_text(
+    await safe_edit_or_resend(callback, 
         text,
-        parse_mode="Markdown",
+        parse_mode=None,
         reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
     )
     await callback.answer()
@@ -287,7 +295,7 @@ async def shift_status_view(callback: types.CallbackQuery):
 async def shift_status_ping(callback: types.CallbackQuery):
     shift_id = int(callback.data.replace("shift_status_ping_", ""))
     user_id = callback.from_user.id
-    is_admin = user_id == int(ADMIN_USER_ID)
+    is_admin = is_admin_user(user_id)
     if not is_admin and (not get_client(user_id) or not client_owns_shift(user_id, shift_id)):
         await callback.answer("Нет доступа.", show_alert=True)
         return
@@ -308,9 +316,15 @@ async def shift_status_ping(callback: types.CallbackQuery):
                 ),
             )
             sent += 1
-        except Exception:
-            # не прерываем общий цикл отправки
-            _ = full_name
+        except Exception as e:
+            logger.warning(
+                "ping unconfirmed worker failed shift_id=%s worker_id=%s name=%s: %s",
+                shift_id,
+                worker_id,
+                full_name,
+                e,
+                exc_info=True,
+            )
     await callback.answer(f"Отправлено напоминаний: {sent}", show_alert=True)
 
 
@@ -318,7 +332,7 @@ async def shift_status_ping(callback: types.CallbackQuery):
 async def shift_replace_pick(callback: types.CallbackQuery):
     shift_id = int(callback.data.replace("shift_replace_pick_", ""))
     user_id = callback.from_user.id
-    is_admin = user_id == int(ADMIN_USER_ID)
+    is_admin = is_admin_user(user_id)
     if not is_admin and (not get_client(user_id) or not client_owns_shift(user_id, shift_id)):
         await callback.answer("Нет доступа.", show_alert=True)
         return
@@ -339,7 +353,7 @@ async def shift_replace_pick(callback: types.CallbackQuery):
             ]
         )
     rows.append([InlineKeyboardButton(text="🔙 Назад", callback_data=f"shift_status_view_{shift_id}")])
-    await callback.message.edit_text(
+    await safe_edit_or_resend(callback, 
         "🔁 Выберите исполнителя, которого нужно заменить:",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
     )
@@ -352,7 +366,7 @@ async def shift_replace_from(callback: types.CallbackQuery):
     shift_id = int(shift_raw)
     old_worker_id = int(old_raw)
     user_id = callback.from_user.id
-    is_admin = user_id == int(ADMIN_USER_ID)
+    is_admin = is_admin_user(user_id)
     if not is_admin and (not get_client(user_id) or not client_owns_shift(user_id, shift_id)):
         await callback.answer("Нет доступа.", show_alert=True)
         return
@@ -372,7 +386,7 @@ async def shift_replace_from(callback: types.CallbackQuery):
             ]
         )
     rows.append([InlineKeyboardButton(text="🔙 Назад", callback_data=f"shift_replace_pick_{shift_id}")])
-    await callback.message.edit_text(
+    await safe_edit_or_resend(callback, 
         "👥 Выберите нового исполнителя на замену:",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
     )
@@ -386,7 +400,7 @@ async def shift_replace_to(callback: types.CallbackQuery):
     old_worker_id = int(old_raw)
     new_worker_id = int(new_raw)
     user_id = callback.from_user.id
-    is_admin = user_id == int(ADMIN_USER_ID)
+    is_admin = is_admin_user(user_id)
     if not is_admin and (not get_client(user_id) or not client_owns_shift(user_id, shift_id)):
         await callback.answer("Нет доступа.", show_alert=True)
         return
@@ -400,21 +414,24 @@ async def shift_replace_to(callback: types.CallbackQuery):
             int(old_worker_id),
             f"ℹ️ Вы сняты со смены #{shift_id}. Если это ошибка — свяжитесь с менеджером.",
         )
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("notify old worker on replace shift_id=%s old=%s: %s", shift_id, old_worker_id, e, exc_info=True)
     try:
         await callback.bot.send_message(
             int(new_worker_id),
             f"📌 Вас назначили на смену #{shift_id}. Подтвердите выход в карточке смены.",
         )
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("notify new worker on replace shift_id=%s new=%s: %s", shift_id, new_worker_id, e, exc_info=True)
     try:
-        await callback.bot.send_message(int(ADMIN_USER_ID), f"🔁 Замена по смене #{shift_id}: {old_worker_id} → {new_worker_id}.")
+        await send_all_admins(
+            callback.bot,
+            f"🔁 Замена по смене #{shift_id}: {old_worker_id} → {new_worker_id}.",
+        )
         if shift_owner and shift_owner[7]:
             await callback.bot.send_message(int(shift_owner[7]), f"🔁 По смене #{shift_id} выполнена замена исполнителя.")
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("notify admins/client on replace shift_id=%s: %s", shift_id, e, exc_info=True)
     try:
         log_shift_replacement(
             shift_id=shift_id,
@@ -423,12 +440,12 @@ async def shift_replace_to(callback: types.CallbackQuery):
             actor_user_id=callback.from_user.id,
             reason="manual_replace_from_status_screen",
         )
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("log_shift_replacement failed shift_id=%s: %s", shift_id, e, exc_info=True)
     shift = get_shift(shift_id)
     assignments = get_shift_assignments(shift_id)
     text = (
-        f"📡 *Статус подтверждения по смене #{shift_id}*\n\n"
+        f"📡 Статус подтверждения по смене #{shift_id}\n\n"
         f"📆 {format_date_ru(shift[2])} {shift[3]}-{shift[4]}\n"
         f"📍 {shift[5]}\n\n"
     )
@@ -446,9 +463,9 @@ async def shift_replace_to(callback: types.CallbackQuery):
             )
         ],
     ]
-    await callback.message.edit_text(
+    await safe_edit_or_resend(callback, 
         text,
-        parse_mode="Markdown",
+        parse_mode=None,
         reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
     )
     await callback.answer("Замена выполнена.", show_alert=True)
@@ -462,7 +479,7 @@ async def my_projects(callback: types.CallbackQuery):
         return
     projects = list_projects_for_client(user_id)
     if not projects:
-        await callback.message.edit_text(
+        await safe_edit_or_resend(callback, 
             "📋 Проектов пока нет. Администратор создаёт проект и привязывает его к вам.",
             reply_markup=InlineKeyboardMarkup(
                 inline_keyboard=[[InlineKeyboardButton(text="🔙 Назад", callback_data="main_menu")]]
@@ -470,7 +487,7 @@ async def my_projects(callback: types.CallbackQuery):
         )
         await callback.answer()
         return
-    text = "📋 *Ваши проекты:*\n\nСмены — в «Мои смены». Здесь — всё по проекту: список смен и общий чат.\n\n"
+    text = "📋 Ваши проекты:\n\nСмены — в «Мои смены». Здесь — всё по проекту: список смен и общий чат.\n\n"
     rows = []
     for p in projects:
         text += f"• #{p[0]} — {p[1]}\n"
@@ -479,18 +496,18 @@ async def my_projects(callback: types.CallbackQuery):
         )
     rows.append([InlineKeyboardButton(text="🔙 Назад", callback_data="main_menu")])
     keyboard = InlineKeyboardMarkup(inline_keyboard=rows)
-    await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="Markdown")
+    await safe_edit_or_resend(callback, text, reply_markup=keyboard, parse_mode=None)
     await callback.answer()
 
 
 @router.callback_query(F.data == "create_project")
 async def create_project_client_stub(callback: types.CallbackQuery):
-    await callback.message.edit_text(
-        "➕ Проект создаёт *администратор* (/admin → «Создать проект») и выбирает вас как заказчика.",
+    await safe_edit_or_resend(callback, 
+        "➕ Проект создаёт администратор (/admin → «Создать проект») и выбирает вас как заказчика.",
         reply_markup=InlineKeyboardMarkup(
             inline_keyboard=[[InlineKeyboardButton(text="🔙 Назад", callback_data="main_menu")]]
         ),
-        parse_mode="Markdown",
+        parse_mode=None,
     )
     await callback.answer()
 
@@ -503,7 +520,7 @@ async def client_shift_chats(callback: types.CallbackQuery):
         return
     shifts = list_shifts_for_client(user_id)
     if not shifts:
-        await callback.message.edit_text(
+        await safe_edit_or_resend(callback, 
             "💬 У вас пока нет смен для чатов.",
             reply_markup=InlineKeyboardMarkup(
                 inline_keyboard=[[InlineKeyboardButton(text="🔙 Назад", callback_data="main_menu")]]
@@ -517,7 +534,7 @@ async def client_shift_chats(callback: types.CallbackQuery):
             [InlineKeyboardButton(text=f"💬 Смена #{s[0]}: {format_date_ru(s[1])} {s[2]}-{s[3]}", callback_data=f"chat_{s[0]}")]
         )
     rows.append([InlineKeyboardButton(text="🔙 Назад", callback_data="main_menu")])
-    await callback.message.edit_text(
+    await safe_edit_or_resend(callback, 
         "💬 Выберите чат смены:",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
     )
@@ -536,17 +553,17 @@ async def shift_detail(callback: types.CallbackQuery):
     assignments = get_shift_assignments(shift_id)
 
     if not shift:
-        await callback.message.edit_text("❌ Смена не найдена.")
+        await safe_edit_or_resend(callback, "❌ Смена не найдена.")
         await callback.answer()
         return
 
     text = (
-        f"📅 *Смена #{shift_id}*\n\n"
+        f"📅 Смена #{shift_id}\n\n"
         f"📆 Дата: {format_date_ru(shift[2])}\n"
         f"⏰ Время: {shift[3]} — {shift[4]}\n"
         f"📍 Локация: {shift[5]}\n"
         f"💰 Ставка: {shift[6]} ₽/час\n\n"
-        f"👥 *Назначенные исполнители:*\n"
+        f"👥 Назначенные исполнители:\n"
     )
 
     for a in assignments:
@@ -562,7 +579,7 @@ async def shift_detail(callback: types.CallbackQuery):
         text += f"• {name}: {status_text}\n  чек-ин: {checkin}\n  чек-аут: {checkout}\n"
 
     text += (
-        "\n_💡 Задание людям: кнопка *«Поставить задачу исполнителям»* — бот спросит название, описание и кого уведомить._\n"
+        "\n💡 Задание людям: кнопка «Поставить задачу исполнителям» — бот спросит название, описание и кого уведомить.\n"
     )
 
     keyboard = InlineKeyboardMarkup(
@@ -579,7 +596,7 @@ async def shift_detail(callback: types.CallbackQuery):
             [InlineKeyboardButton(text="🔙 Назад", callback_data="my_shifts")],
         ]
     )
-    await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="Markdown")
+    await safe_edit_or_resend(callback, text, reply_markup=keyboard, parse_mode=None)
     await callback.answer()
 
 
@@ -591,12 +608,12 @@ async def worker_shift_detail(callback: types.CallbackQuery):
     assignment = get_assignment(shift_id, user_id)
 
     if not shift or not assignment:
-        await callback.message.edit_text("❌ Смена не найдена или вы не назначены.")
+        await safe_edit_or_resend(callback, "❌ Смена не найдена или вы не назначены.")
         await callback.answer()
         return
 
     text = (
-        f"📅 *Смена #{shift_id}*\n\n"
+        f"📅 Смена #{shift_id}\n\n"
         f"📆 Дата: {format_date_ru(shift[2])}\n"
         f"⏰ Время: {shift[3]} — {shift[4]}\n"
         f"📍 Локация: {shift[5]}\n"
@@ -658,7 +675,7 @@ async def worker_shift_detail(callback: types.CallbackQuery):
     )
     keyboard_rows.append([InlineKeyboardButton(text="🔙 Назад", callback_data="my_shifts")])
     keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
-    await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="Markdown")
+    await safe_edit_or_resend(callback, text, reply_markup=keyboard, parse_mode=None)
     await callback.answer()
 
 
@@ -670,15 +687,15 @@ async def confirm_shift(callback: types.CallbackQuery):
     shift_owner = get_shift_with_owner(shift_id)
     txt = f"✅ Исполнитель {callback.from_user.full_name} подтвердил выход на смену #{shift_id}."
     try:
-        await callback.bot.send_message(int(ADMIN_USER_ID), txt)
-    except Exception:
-        pass
+        await send_all_admins(callback.bot, txt)
+    except Exception as e:
+        logger.warning("notify admins on confirm shift_id=%s: %s", shift_id, e, exc_info=True)
     try:
         if shift_owner and shift_owner[7]:
             await callback.bot.send_message(int(shift_owner[7]), txt)
-    except Exception:
-        pass
-    await callback.message.edit_text(
+    except Exception as e:
+        logger.warning("notify client on confirm shift_id=%s: %s", shift_id, e, exc_info=True)
+    await safe_edit_or_resend(callback, 
         f"✅ Вы подтвердили выход на смену #{shift_id}!",
         reply_markup=InlineKeyboardMarkup(
             inline_keyboard=[
@@ -694,14 +711,14 @@ async def checkin_start(callback: types.CallbackQuery, state: FSMContext):
     shift_id = int(callback.data.replace("checkin_", ""))
     await state.update_data(checkin_shift_id=shift_id)
     await state.set_state(CheckinFlow.geo)
-    await callback.message.edit_text(
-        "📍 *ЧЕК-ИН*\n\n"
+    await safe_edit_or_resend(callback, 
+        "📍 ЧЕК-ИН\n\n"
         "Сделайте по шагам:\n"
-        "1) Отправьте *локацию* (скрепка 📎 -> Локация)\n"
+        "1) Отправьте локацию (скрепка 📎 -> Локация)\n"
         "2) Дождитесь сообщения от бота\n"
-        "3) Отправьте *селфи фото* (не как файл)\n\n"
+        "3) Отправьте селфи фото (не как файл)\n\n"
         "⚠️ Одним сообщением чек-ин отправить нельзя.",
-        parse_mode="Markdown",
+        parse_mode=None,
     )
     await callback.answer()
 
@@ -724,7 +741,7 @@ async def break_start_menu(callback: types.CallbackQuery):
             [InlineKeyboardButton(text="🔙 Назад к смене", callback_data=f"worker_shift_{shift_id}")],
         ]
     )
-    await callback.message.edit_text("⏸ Выберите тип перерыва:", reply_markup=kb)
+    await safe_edit_or_resend(callback, "⏸ Выберите тип перерыва:", reply_markup=kb)
     await callback.answer()
 
 
@@ -740,7 +757,7 @@ async def break_type_start(callback: types.CallbackQuery):
     if not ok:
         await callback.answer("Перерыв уже запущен.", show_alert=True)
         return
-    await callback.message.edit_text(
+    await safe_edit_or_resend(callback, 
         f"⏸ Перерыв начат ({break_type}).\nНажмите «Завершить перерыв», когда вернётесь.",
         reply_markup=InlineKeyboardMarkup(
             inline_keyboard=[
@@ -759,7 +776,7 @@ async def break_stop_now(callback: types.CallbackQuery):
     if not ok:
         await callback.answer("Активный перерыв не найден.", show_alert=True)
         return
-    await callback.message.edit_text(
+    await safe_edit_or_resend(callback, 
         "▶️ Перерыв завершён.",
         reply_markup=InlineKeyboardMarkup(
             inline_keyboard=[[InlineKeyboardButton(text="🔙 К смене", callback_data=f"worker_shift_{shift_id}")]]
@@ -807,17 +824,17 @@ async def checkin_geo_received(message: types.Message, state: FSMContext):
     )
     await state.set_state(CheckinFlow.photo)
     await message.answer(
-        "📸 *ЧЕК-ИН*\n\nОтправьте селфи на фоне объекта.\n\n*Скрепка 📎 → Камера*",
-        parse_mode="Markdown",
+        "📸 ЧЕК-ИН\n\nОтправьте селфи на фоне объекта.\n\nСкрепка 📎 → Камера",
+        parse_mode=None,
     )
 
 
 @router.message(CheckinFlow.geo)
 async def checkin_geo_wrong_payload(message: types.Message):
     await message.answer(
-        "⚠️ Для этого шага нужна именно *геолокация*.\n"
+        "⚠️ Для этого шага нужна именно геолокация.\n"
         "Нажмите скрепку 📎 -> Локация и отправьте текущую точку.",
-        parse_mode="Markdown",
+        parse_mode=None,
     )
 
 
@@ -866,22 +883,25 @@ async def checkin_photo_received(message: types.Message, state: FSMContext):
                 f"с опозданием на {max(delay_min, 1)} мин."
             )
             try:
-                await message.bot.send_message(int(ADMIN_USER_ID), late_text)
+                await send_all_admins(message.bot, late_text)
                 client_id = shift_owner[7]
                 if client_id:
                     await message.bot.send_message(int(client_id), late_text)
-            except Exception:
-                pass
-    await message.answer("✅ *Чек-ин выполнен!* Удачной смены! 🚀", parse_mode="Markdown")
+            except Exception as e:
+                logger.warning("late checkin notify shift_id=%s: %s", shift_id, e, exc_info=True)
+    await message.answer(
+        "✅ " + bold("Чек-ин выполнен!") + " " + em("Удачной смены! 🚀"),
+        parse_mode=PARSE_MODE_TELEGRAM,
+    )
     await state.clear()
 
 
 @router.message(CheckinFlow.photo)
 async def checkin_photo_wrong_payload(message: types.Message):
     await message.answer(
-        "⚠️ Сейчас нужно отправить *селфи фото*.\n"
+        "⚠️ Сейчас нужно отправить селфи фото.\n"
         "Отправьте изображение как фото (не как файл/document).",
-        parse_mode="Markdown",
+        parse_mode=None,
     )
 
 
@@ -894,13 +914,13 @@ async def checkout_start(callback: types.CallbackQuery, state: FSMContext):
         return
     await state.update_data(checkout_shift_id=shift_id)
     await state.set_state(CheckoutFlow.geo)
-    await callback.message.edit_text(
-        "📍 *ЧЕК-АУТ*\n\n"
+    await safe_edit_or_resend(callback, 
+        "📍 ЧЕК-АУТ\n\n"
         "По шагам:\n"
-        "1) Отправьте *геолокацию* (скрепка 📎 → Локация)\n"
-        "2) Затем *селфи фото* (не как файл)\n\n"
+        "1) Отправьте геолокацию (скрепка 📎 → Локация)\n"
+        "2) Затем селфи фото (не как файл)\n\n"
         "⚠️ Одним сообщением чек-аут отправить нельзя.",
-        parse_mode="Markdown",
+        parse_mode=None,
     )
     await callback.answer()
 
@@ -936,18 +956,18 @@ async def checkout_geo_received(message: types.Message, state: FSMContext):
     )
     await state.set_state(CheckoutFlow.photo)
     await message.answer(
-        "📸 *ЧЕК-АУТ*\n\n"
+        "📸 ЧЕК-АУТ\n\n"
         "Отправьте селфи на фоне объекта (как при чек-ине).\n\n"
-        "*Скрепка 📎 → Камера*",
-        parse_mode="Markdown",
+        "Скрепка 📎 → Камера",
+        parse_mode=None,
     )
 
 
 @router.message(CheckoutFlow.geo)
 async def checkout_geo_wrong_payload(message: types.Message):
     await message.answer(
-        "⚠️ Нужна *геолокация* для чек-аута.\nСкрепка 📎 → Локация.",
-        parse_mode="Markdown",
+        "⚠️ Нужна геолокация для чек-аута.\nСкрепка 📎 → Локация.",
+        parse_mode=None,
     )
 
 
@@ -963,7 +983,10 @@ async def checkout_photo_received(message: types.Message, state: FSMContext):
         )
         await state.clear()
         return
-    await message.answer("✅ *Смена завершена!* Спасибо за работу!", parse_mode="Markdown")
+    await message.answer(
+        "✅ " + bold("Смена завершена!") + " " + em("Спасибо за работу!"),
+        parse_mode=PARSE_MODE_TELEGRAM,
+    )
     await state.clear()
 
 
@@ -977,8 +1000,8 @@ async def checkout_skip_photo(message: types.Message, state: FSMContext):
 @router.message(CheckoutFlow.photo, ~F.photo)
 async def checkout_photo_wrong_type(message: types.Message):
     await message.answer(
-        "⚠️ Отправьте изображение именно как *фото* (камера), не как файл.",
-        parse_mode="Markdown",
+        "⚠️ Отправьте изображение именно как фото (камера), не как файл.",
+        parse_mode=None,
     )
 
 
@@ -989,7 +1012,7 @@ async def forgot_close_shift(callback: types.CallbackQuery):
     if not ok:
         await callback.answer("Не удалось закрыть смену (нет чек-ина или уже закрыта).", show_alert=True)
         return
-    await callback.message.edit_text("✅ Смена закрыта. Спасибо!")
+    await safe_edit_or_resend(callback, "✅ Смена закрыта. Спасибо!")
     await callback.answer()
 
 
@@ -998,7 +1021,10 @@ async def forgot_extend_shift(callback: types.CallbackQuery, state: FSMContext):
     shift_id = int(callback.data.replace("forgot_extend_", ""))
     await state.update_data(extend_shift_id=shift_id)
     await state.set_state(ShiftExtensionFlow.minutes)
-    await callback.message.answer("⏱ На сколько минут продлить смену? Введите число, например `60`.", parse_mode="Markdown")
+    await callback.message.answer(
+        em("На сколько минут продлить смену? Введите число, например ") + bold("60") + em("."),
+        parse_mode=PARSE_MODE_TELEGRAM,
+    )
     await callback.answer()
 
 
@@ -1006,7 +1032,10 @@ async def forgot_extend_shift(callback: types.CallbackQuery, state: FSMContext):
 async def forgot_extend_minutes(message: types.Message, state: FSMContext):
     raw = (message.text or "").strip()
     if not raw.isdigit():
-        await message.answer("Введите число минут, например `60`.", parse_mode="Markdown")
+        await message.answer(
+            em("Введите число минут, например ") + bold("60") + em("."),
+            parse_mode=PARSE_MODE_TELEGRAM,
+        )
         return
     minutes = int(raw)
     if minutes < 15 or minutes > 240:
@@ -1025,8 +1054,8 @@ async def forgot_extend_minutes(message: types.Message, state: FSMContext):
             [InlineKeyboardButton(text="❌ Отказать", callback_data=f"admin_ext_no_{shift_id}_{message.from_user.id}_{minutes}")],
         ]
     )
-    await message.bot.send_message(
-        int(ADMIN_USER_ID),
+    await send_all_admins(
+        message.bot,
         f"⏱ Запрос продления смены #{shift_id} на {minutes} минут от исполнителя {message.from_user.full_name}.",
         reply_markup=kb,
     )
@@ -1042,7 +1071,7 @@ async def forgot_extend_minutes(message: types.Message, state: FSMContext):
 
 @router.callback_query(F.data.startswith("admin_ext_ok_"))
 async def admin_extension_approve(callback: types.CallbackQuery):
-    if callback.from_user.id != int(ADMIN_USER_ID):
+    if not is_admin_user(callback.from_user.id):
         await callback.answer("Нет доступа.", show_alert=True)
         return
     _, _, _, shift_raw, worker_raw, min_raw = callback.data.split("_", 5)
@@ -1052,13 +1081,13 @@ async def admin_extension_approve(callback: types.CallbackQuery):
     resolve_extension_request(shift_id, worker_id, approved=True)
     extend_shift_end_time(shift_id, minutes)
     await callback.bot.send_message(worker_id, f"✅ Продление смены #{shift_id} на {minutes} минут одобрено администратором.")
-    await callback.message.edit_text(f"✅ Продление по смене #{shift_id} одобрено.")
+    await safe_edit_or_resend(callback, f"✅ Продление по смене #{shift_id} одобрено.")
     await callback.answer()
 
 
 @router.callback_query(F.data.startswith("admin_ext_no_"))
 async def admin_extension_reject(callback: types.CallbackQuery):
-    if callback.from_user.id != int(ADMIN_USER_ID):
+    if not is_admin_user(callback.from_user.id):
         await callback.answer("Нет доступа.", show_alert=True)
         return
     _, _, _, shift_raw, worker_raw, min_raw = callback.data.split("_", 5)
@@ -1072,13 +1101,13 @@ async def admin_extension_reject(callback: types.CallbackQuery):
             worker_id,
             f"❌ Продление на {minutes} минут отклонено. Смена #{shift_id} закрыта.",
         )
-        await callback.message.edit_text(f"✅ Продление отклонено, смена #{shift_id} закрыта.")
+        await safe_edit_or_resend(callback, f"✅ Продление отклонено, смена #{shift_id} закрыта.")
     else:
         await callback.bot.send_message(
             worker_id,
             f"❌ Продление на {minutes} минут отклонено. Закройте смену #{shift_id} вручную (чек-аут в карточке).",
         )
-        await callback.message.edit_text(
+        await safe_edit_or_resend(callback, 
             f"Продление отклонено. Автозакрытие не удалось — проверьте статус смены #{shift_id}."
         )
     await callback.answer()
@@ -1093,7 +1122,7 @@ async def client_pick_worker_to_message(callback: types.CallbackQuery):
         return
     assignments = get_shift_assignments(shift_id)
     if not assignments:
-        await callback.message.edit_text(
+        await safe_edit_or_resend(callback, 
             "❌ На смену пока никто не назначен.",
             reply_markup=InlineKeyboardMarkup(
                 inline_keyboard=[[InlineKeyboardButton(text="🔙 Назад", callback_data=f"shift_detail_{shift_id}")]]
@@ -1107,7 +1136,7 @@ async def client_pick_worker_to_message(callback: types.CallbackQuery):
         worker_name = _assign_worker_name(a) or f"id {worker_id}"
         rows.append([InlineKeyboardButton(text=f"{worker_name}", callback_data=f"msg_worker_to_{shift_id}_{worker_id}")])
     rows.append([InlineKeyboardButton(text="🔙 Назад", callback_data=f"shift_detail_{shift_id}")])
-    await callback.message.edit_text(
+    await safe_edit_or_resend(callback, 
         "✉️ Выберите исполнителя, которому отправить сообщение:",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
     )
@@ -1149,16 +1178,25 @@ async def client_message_worker_send(message: types.Message, state: FSMContext):
         await message.answer("❌ Пустое сообщение нельзя отправить.")
         return
     try:
-        await message.bot.send_message(
-            worker_id,
-            "📩 *Сообщение от заказчика*\n\n"
-            f"Смена #{shift_id}\n"
-            f"От: {sender}\n\n"
-            f"{text}",
-            parse_mode="Markdown",
+        body = (
+            bold("Сообщение от заказчика")
+            + "\n\n"
+            + em(f"Смена #{shift_id}")
+            + "\n"
+            + em(f"От: {sender}")
+            + "\n\n"
+            + em(text)
         )
+        await message.bot.send_message(worker_id, body, parse_mode=PARSE_MODE_TELEGRAM)
         await message.answer("✅ Сообщение отправлено исполнителю.")
-    except Exception:
+    except Exception as e:
+        logger.warning(
+            "client_message_worker_send failed worker_id=%s shift_id=%s: %s",
+            worker_id,
+            shift_id,
+            e,
+            exc_info=True,
+        )
         await message.answer("❌ Не удалось отправить сообщение исполнителю.")
     await state.clear()
 
@@ -1218,15 +1256,15 @@ def _render_report_text(shift_id: int, report: dict, tab: str, task_filter: str 
         sla = "🟡 внимание"
 
     header = (
-        f"📊 *ОТЧЁТ ПО СМЕНЕ #{shift_id}*\n\n"
+        f"📊 ОТЧЁТ ПО СМЕНЕ #{shift_id}\n\n"
         f"📆 {format_date_ru(shift[2])} | {shift[3]}-{shift[4]}\n"
         f"📍 {shift[5]}\n"
         f"💰 Ставка: {shift[6]} ₽/час\n"
-        f"SLA: *{sla}*\n\n"
+        f"SLA: {sla}\n\n"
     )
 
     if tab == "people":
-        text = header + "👥 *ИСПОЛНИТЕЛИ*\n"
+        text = header + "👥 ИСПОЛНИТЕЛИ\n"
         total_payment = 0.0
         for a in assignments:
             hours = float(a[9] or 0)
@@ -1238,11 +1276,11 @@ def _render_report_text(shift_id: int, report: dict, tab: str, task_filter: str 
             name = _assign_worker_name(a)
             extra = f" (штраф {penalty_h:.1f} ч)" if penalty_h > 0 else ""
             text += f"{status} {name}: факт {hours:.1f} ч, к оплате {billed_h:.1f} ч{extra}, {payment:.0f} ₽\n"
-        text += f"\n💰 *ИТОГО:* {total_payment:.0f} ₽"
+        text += f"\n💰 ИТОГО: {total_payment:.0f} ₽"
         return text
 
     if tab == "tasks":
-        text = header + "📋 *ЗАДАЧИ*\n"
+        text = header + "📋 ЗАДАЧИ\n"
         if not tasks:
             return text + "• задач нет\n"
         done = 0
@@ -1281,7 +1319,7 @@ def _render_report_text(shift_id: int, report: dict, tab: str, task_filter: str 
         text += f"\nИтого задач: {len(tasks)}, выполнено: {done}, показано: {shown}"
         return text
 
-    text = header + "⏸ *ПЕРЕРЫВЫ*\n"
+    text = header + "⏸ ПЕРЕРЫВЫ\n"
     if not breaks:
         return text + "• перерывы не фиксировались\n"
     by_worker: dict[int, int] = {}
@@ -1296,7 +1334,7 @@ def _render_report_text(shift_id: int, report: dict, tab: str, task_filter: str 
     for wid, name in by_name.items():
         total_m = by_worker.get(wid, 0)
         text += f"• {name}: суммарно {total_m} мин\n"
-    text += "\n_Перерывы фиксируются для контроля; в расчёт оплаты пока не вычитаются._"
+    text += "\nПерерывы фиксируются для контроля; в расчёт оплаты пока не вычитаются."
     return text
 
 
@@ -1312,7 +1350,7 @@ async def report_share(callback: types.CallbackQuery):
         await callback.answer("Смена не найдена.", show_alert=True)
         return
     text = _render_report_text(shift_id, report, "people")
-    await callback.message.answer("📤 *Краткая сводка для пересылки:*\n\n" + text, parse_mode="Markdown")
+    await callback.message.answer("📤 Краткая сводка для пересылки:\n\n" + text, parse_mode=None)
     await callback.answer("Сводка отправлена ниже.")
 
 
@@ -1332,14 +1370,14 @@ async def show_shift_report_tab(callback: types.CallbackQuery):
         return
     report = get_shift_report(shift_id)
     if not report["shift"]:
-        await callback.message.edit_text("❌ Смена не найдена.")
+        await safe_edit_or_resend(callback, "❌ Смена не найдена.")
         await callback.answer()
         return
     text = _render_report_text(shift_id, report, tab, task_filter)
-    await callback.message.edit_text(
+    await safe_edit_or_resend(callback, 
         text,
         reply_markup=_report_tabs_keyboard(shift_id, tab, task_filter),
-        parse_mode="Markdown",
+        parse_mode=None,
     )
     await callback.answer()
 
@@ -1359,14 +1397,14 @@ async def report_task_filter(callback: types.CallbackQuery):
         return
     report = get_shift_report(shift_id)
     if not report["shift"]:
-        await callback.message.edit_text("❌ Смена не найдена.")
+        await safe_edit_or_resend(callback, "❌ Смена не найдена.")
         await callback.answer()
         return
     text = _render_report_text(shift_id, report, "tasks", task_filter)
-    await callback.message.edit_text(
+    await safe_edit_or_resend(callback, 
         text,
         reply_markup=_report_tabs_keyboard(shift_id, "tasks", task_filter),
-        parse_mode="Markdown",
+        parse_mode=None,
     )
     await callback.answer()
 
@@ -1415,11 +1453,11 @@ async def report_ping_overdue(callback: types.CallbackQuery):
         try:
             await callback.bot.send_message(
                 int(wid),
-                "⚠️ *Напоминание по просроченным задачам*\n\n"
+                "⚠️ Напоминание по просроченным задачам\n\n"
                 f"Смена #{shift_id} уже завершилась, но у вас есть невыполненные задачи:\n"
                 f"{preview}\n\n"
                 "Пожалуйста, завершите задачи или свяжитесь с координатором.",
-                parse_mode="Markdown",
+                parse_mode=None,
                 reply_markup=InlineKeyboardMarkup(
                     inline_keyboard=[
                         [InlineKeyboardButton(text="Открыть задачи смены", callback_data=f"tasks_{shift_id}")]
@@ -1428,8 +1466,14 @@ async def report_ping_overdue(callback: types.CallbackQuery):
             )
             sent += 1
             record_overdue_task_ping(shift_id, int(wid))
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(
+                "report_ping_overdue send failed shift_id=%s worker_id=%s: %s",
+                shift_id,
+                wid,
+                e,
+                exc_info=True,
+            )
     await callback.answer(f"Пинг отправлен {sent} исполнителям.", show_alert=True)
 
 
@@ -1442,13 +1486,13 @@ async def show_shift_report(callback: types.CallbackQuery):
         return
     report = get_shift_report(shift_id)
     if not report["shift"]:
-        await callback.message.edit_text("❌ Смена не найдена.")
+        await safe_edit_or_resend(callback, "❌ Смена не найдена.")
         await callback.answer()
         return
     text = _render_report_text(shift_id, report, "people")
-    await callback.message.edit_text(
+    await safe_edit_or_resend(callback, 
         text,
         reply_markup=_report_tabs_keyboard(shift_id, "people", "all"),
-        parse_mode="Markdown",
+        parse_mode=None,
     )
     await callback.answer()

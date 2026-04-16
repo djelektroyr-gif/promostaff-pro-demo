@@ -1,5 +1,6 @@
 # handlers/admin.py
 import inspect
+import logging
 import re
 from functools import wraps
 
@@ -8,7 +9,7 @@ from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-from config import ADMIN_USER_ID
+from config import is_admin_user
 from states import ProjectCreation, ShiftCreation, ShiftAdminLine
 from db import (
     create_project,
@@ -39,16 +40,13 @@ from db import (
 )
 
 router = Router()
+logger = logging.getLogger(__name__)
 STATUS_RU = {
     "new": "Новая",
     "reviewed": "На проверке",
     "approved": "Одобрена",
     "rejected": "Отклонена",
 }
-
-
-def is_admin(user_id: int) -> bool:
-    return user_id == ADMIN_USER_ID
 
 
 def admin_only(func):
@@ -63,7 +61,7 @@ def admin_only(func):
     async def wrapper(event, *args, **kwargs):
         user = getattr(event, "from_user", None)
         user_id = getattr(user, "id", 0)
-        if not is_admin(user_id):
+        if not is_admin_user(user_id):
             if hasattr(event, "answer") and callable(getattr(event, "answer")):
                 await event.answer("⛔ У вас нет прав.", show_alert=True)
             elif hasattr(event, "message") and event.message:
@@ -145,7 +143,7 @@ async def admin_panel(message: types.Message):
         "• *Сервис* — заполнить демо-данными, проверить БД\n\n"
         "Этот же экран: команда /admin или кнопка «Админ-панель» в меню.",
         reply_markup=_admin_main_keyboard(),
-        parse_mode="Markdown",
+        parse_mode=None,
     )
 
 
@@ -166,7 +164,7 @@ async def admin_menu_monitoring(callback: types.CallbackQuery):
         "• *Метрики* — сколько людей и открытых смен.\n"
         "• *Лог* — что делали в админке.\n\n"
         "Нажмите кнопку ниже.",
-        parse_mode="Markdown",
+        parse_mode=None,
         reply_markup=_admin_monitoring_keyboard(),
     )
     await callback.answer()
@@ -179,7 +177,7 @@ async def admin_menu_people(callback: types.CallbackQuery):
         "👥 *Люди*\n\n"
         "Здесь списки *исполнителей* (и их статус модерации) и *заказчиков*. "
         "Удаление — только если человек ошибочно завёлся.",
-        parse_mode="Markdown",
+        parse_mode=None,
         reply_markup=_admin_people_keyboard(),
     )
     await callback.answer()
@@ -195,7 +193,7 @@ async def admin_menu_ops(callback: types.CallbackQuery):
         "2) *Создать смену* (дата, время, адрес)\n"
         "3) *Назначить на смену* — без этого заказчик не сможет поставить задачи\n\n"
         "«Управление» — список для правок и удаления.",
-        parse_mode="Markdown",
+        parse_mode=None,
         reply_markup=_admin_ops_keyboard(),
     )
     await callback.answer()
@@ -208,7 +206,7 @@ async def admin_menu_service(callback: types.CallbackQuery):
         "⚙️ *Сервис*\n\n"
         "*Тест-данные* — быстро наполнить демо людьми и сменами (для репетиции).\n"
         "*Статус БД* — если что-то «пропало», смотреть первым делом.",
-        parse_mode="Markdown",
+        parse_mode=None,
         reply_markup=_admin_service_keyboard(),
     )
     await callback.answer()
@@ -220,7 +218,7 @@ async def admin_db_status_cb(callback: types.CallbackQuery):
     report = get_db_status_report()
     await callback.message.edit_text(
         f"🧾 *Статус БД*\n\n{report}",
-        parse_mode="Markdown",
+        parse_mode=None,
         reply_markup=InlineKeyboardMarkup(
             inline_keyboard=[[InlineKeyboardButton(text="🔙 Назад", callback_data="admin_menu_service")]]
         ),
@@ -238,7 +236,7 @@ async def admin_metrics(callback: types.CallbackQuery):
         f"🏢 Заказчики: *{m['clients']}*\n"
         f"📁 Проекты: *{m['projects']}*\n"
         f"📅 Открытые смены: *{m['open_shifts']}*",
-        parse_mode="Markdown",
+        parse_mode=None,
         reply_markup=InlineKeyboardMarkup(
             inline_keyboard=[
                 [
@@ -286,7 +284,7 @@ async def _render_risk_dashboard(callback: types.CallbackQuery, kind: str) -> No
         text += "Рисков не найдено.\n"
         await callback.message.edit_text(
             text,
-            parse_mode="Markdown",
+            parse_mode=None,
             reply_markup=_risk_filter_keyboard(kind),
         )
         await callback.answer()
@@ -335,7 +333,7 @@ async def _render_risk_dashboard(callback: types.CallbackQuery, kind: str) -> No
     buttons.extend(_risk_filter_keyboard(kind).inline_keyboard)
     await callback.message.edit_text(
         text[:3900],
-        parse_mode="Markdown",
+        parse_mode=None,
         reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
     )
     await callback.answer()
@@ -378,7 +376,8 @@ async def admin_risk_ping_one(callback: types.CallbackQuery):
             ),
         )
         await callback.answer("Пинг отправлен исполнителю.", show_alert=True)
-    except Exception:
+    except Exception as e:
+        logger.warning("admin_risk_ping_one failed worker_id=%s shift_id=%s: %s", worker_id, shift_id, e, exc_info=True)
         await callback.answer("Не удалось отправить пинг.", show_alert=True)
 
 
@@ -404,13 +403,14 @@ async def admin_risk_message_one(callback: types.CallbackQuery):
             "✉️ *Сообщение от администрации*\n\n"
             f"По смене #{shift_id} нужен ваш оперативный ответ.\n"
             "Подтвердите готовность к выходу или свяжитесь с менеджером прямо сейчас.",
-            parse_mode="Markdown",
+            parse_mode=None,
             reply_markup=InlineKeyboardMarkup(
                 inline_keyboard=[[InlineKeyboardButton(text="Открыть смену", callback_data=f"worker_shift_{shift_id}")]]
             ),
         )
         await callback.answer(f"Сообщение отправлено: {name}", show_alert=True)
-    except Exception:
+    except Exception as e:
+        logger.warning("admin_risk_message_one failed worker_id=%s shift_id=%s: %s", worker_id, shift_id, e, exc_info=True)
         await callback.answer("Не удалось отправить сообщение.", show_alert=True)
 
 
@@ -428,7 +428,7 @@ async def show_workers(callback: types.CallbackQuery):
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[[InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back")]]
     )
-    await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="Markdown")
+    await callback.message.edit_text(text, reply_markup=keyboard, parse_mode=None)
     await callback.answer()
 
 
@@ -448,7 +448,7 @@ async def admin_worker_statuses_menu(callback: types.CallbackQuery):
     )
     await callback.message.edit_text(
         "🧭 *Статусы заявок исполнителей*\n\nВыберите фильтр.",
-        parse_mode="Markdown",
+        parse_mode=None,
         reply_markup=keyboard,
     )
     await callback.answer()
@@ -462,7 +462,7 @@ async def admin_workers_by_status(callback: types.CallbackQuery):
     if not workers:
         await callback.message.edit_text(
             f"📋 Нет исполнителей со статусом `{status}`.",
-            parse_mode="Markdown",
+            parse_mode=None,
             reply_markup=InlineKeyboardMarkup(
                 inline_keyboard=[
                     [InlineKeyboardButton(text="🔙 К фильтрам", callback_data="admin_worker_statuses")],
@@ -480,7 +480,7 @@ async def admin_workers_by_status(callback: types.CallbackQuery):
     rows.append([InlineKeyboardButton(text="🔙 К фильтрам", callback_data="admin_worker_statuses")])
     await callback.message.edit_text(
         text,
-        parse_mode="Markdown",
+        parse_mode=None,
         reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
     )
     await callback.answer()
@@ -505,7 +505,7 @@ async def admin_worker_status_pick(callback: types.CallbackQuery):
     )
     await callback.message.edit_text(
         f"⚙️ Выберите новый статус для исполнителя `{worker_id}`:",
-        parse_mode="Markdown",
+        parse_mode=None,
         reply_markup=keyboard,
     )
     await callback.answer()
@@ -526,7 +526,7 @@ async def admin_worker_status_set(callback: types.CallbackQuery):
         log_admin_action(callback.from_user.id, "set_worker_status", "worker", worker_id, new_status)
         await callback.message.edit_text(
             f"✅ Статус исполнителя `{worker_id}` обновлён: *{STATUS_RU.get(new_status, new_status)}*",
-            parse_mode="Markdown",
+            parse_mode=None,
             reply_markup=InlineKeyboardMarkup(
                 inline_keyboard=[[InlineKeyboardButton(text="🔙 К фильтрам", callback_data="admin_worker_statuses")]]
             ),
@@ -576,7 +576,7 @@ async def admin_workers_delete_menu(callback: types.CallbackQuery):
     await callback.message.edit_text(
         text,
         reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
-        parse_mode="Markdown",
+        parse_mode=None,
     )
     await callback.answer()
 
@@ -605,7 +605,7 @@ async def admin_worker_delete_confirm(callback: types.CallbackQuery):
         f"Открытых задач будет отвязано: *{stats['open_tasks']}*\n\n"
         "Продолжить?",
         reply_markup=keyboard,
-        parse_mode="Markdown",
+        parse_mode=None,
     )
     await callback.answer()
 
@@ -625,7 +625,7 @@ async def admin_worker_delete_do(callback: types.CallbackQuery):
             reply_markup=InlineKeyboardMarkup(
                 inline_keyboard=[[InlineKeyboardButton(text="🔙 К удалению", callback_data="admin_workers_delete")]]
             ),
-            parse_mode="Markdown",
+            parse_mode=None,
         )
         await callback.answer()
         return
@@ -647,7 +647,7 @@ async def admin_worker_delete_do(callback: types.CallbackQuery):
                 [InlineKeyboardButton(text="🏠 В админ-панель", callback_data="admin_back")],
             ]
         ),
-        parse_mode="Markdown",
+        parse_mode=None,
     )
     await callback.answer()
 
@@ -670,7 +670,7 @@ async def admin_list_clients(callback: types.CallbackQuery):
     for c in clients:
         uid, company, contact, phone = c[0], c[1] or "—", c[2] or "—", c[3] or "—"
         text += f"🆔 `{uid}` — {company} / {contact} / {phone}\n"
-        if int(uid) == int(ADMIN_USER_ID):
+        if is_admin_user(int(uid)):
             text += "   _(это ваш admin-аккаунт — не удаляйте через бота, если сами заказчик)_\n"
         else:
             rows.append(
@@ -682,7 +682,7 @@ async def admin_list_clients(callback: types.CallbackQuery):
                 ]
             )
     rows.append([InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back")])
-    await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows), parse_mode="Markdown")
+    await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows), parse_mode=None)
     await callback.answer()
 
 
@@ -694,7 +694,7 @@ async def admin_delete_client(callback: types.CallbackQuery):
         await callback.answer()
         return
     cid = int(raw)
-    if cid == int(ADMIN_USER_ID):
+    if is_admin_user(int(cid)):
         await callback.answer("Нельзя удалить свой admin-id как заказчика из этой кнопки.", show_alert=True)
         return
     delete_client_cascade(cid)
@@ -704,7 +704,7 @@ async def admin_delete_client(callback: types.CallbackQuery):
         reply_markup=InlineKeyboardMarkup(
             inline_keyboard=[[InlineKeyboardButton(text="🔙 К списку", callback_data="admin_clients")]]
         ),
-        parse_mode="Markdown",
+        parse_mode=None,
     )
     await callback.answer()
 
@@ -732,7 +732,7 @@ async def admin_create_project_pick_client(callback: types.CallbackQuery, state:
     await callback.message.edit_text(
         "➕ *Новый проект*\n\nВыберите заказчика (владельца проекта):",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
-        parse_mode="Markdown",
+        parse_mode=None,
     )
     await callback.answer()
 
@@ -745,7 +745,7 @@ async def admin_create_project_ask_name(callback: types.CallbackQuery, state: FS
     await state.set_state(ProjectCreation.enter_name)
     await callback.message.answer(
         f"Введите *название проекта* для заказчика `{uid}` одним сообщением:",
-        parse_mode="Markdown",
+        parse_mode=None,
     )
     await callback.answer()
 
@@ -766,7 +766,7 @@ async def admin_create_project_finish(message: types.Message, state: FSMContext)
     project_id = create_project(name, int(client_id))
     log_admin_action(message.from_user.id, "create_project", "project", project_id, f"client_id={client_id}")
     await state.clear()
-    await message.answer(f"✅ Проект создан. ID: `{project_id}`, заказчик: `{client_id}`", parse_mode="Markdown")
+    await message.answer(f"✅ Проект создан. ID: `{project_id}`, заказчик: `{client_id}`", parse_mode=None)
     await admin_panel(message)
 
 
@@ -797,7 +797,7 @@ async def admin_project_manage(callback: types.CallbackQuery):
     rows.append([InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back")])
     await callback.message.edit_text(
         text,
-        parse_mode="Markdown",
+        parse_mode=None,
         reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
     )
     await callback.answer()
@@ -886,7 +886,7 @@ async def admin_create_shift_form(callback: types.CallbackQuery, state: FSMConte
         "📅 *Создание смены (шаг 1/5)*\n\n"
         "Введите дату в формате `ДД.ММ.ГГГГ`.\n"
         "Пример: `15.05.2026`",
-        parse_mode="Markdown",
+        parse_mode=None,
     )
     await callback.answer()
 
@@ -919,13 +919,13 @@ async def admin_create_shift_date(message: types.Message, state: FSMContext):
 
         normalize_shift_date(raw)
     except Exception:
-        await message.answer("❌ Неверная дата. Используйте формат `ДД.ММ.ГГГГ`, например `15.05.2026`.", parse_mode="Markdown")
+        await message.answer("❌ Неверная дата. Используйте формат `ДД.ММ.ГГГГ`, например `15.05.2026`.", parse_mode=None)
         return
     await state.update_data(shift_date=raw)
     await state.set_state(ShiftCreation.start_time)
     await message.answer(
         "⏰ *Шаг 2/5*\nВведите время начала в формате `ЧЧ:ММ`.\nПример: `10:00`",
-        parse_mode="Markdown",
+        parse_mode=None,
     )
 
 
@@ -934,13 +934,13 @@ async def admin_create_shift_date(message: types.Message, state: FSMContext):
 async def admin_create_shift_start_time(message: types.Message, state: FSMContext):
     start_time = (message.text or "").strip()
     if not _is_hhmm(start_time):
-        await message.answer("❌ Неверный формат времени. Пример: `10:00`", parse_mode="Markdown")
+        await message.answer("❌ Неверный формат времени. Пример: `10:00`", parse_mode=None)
         return
     await state.update_data(start_time=start_time)
     await state.set_state(ShiftCreation.end_time)
     await message.answer(
         "⏱ *Шаг 3/7*\nВведите время окончания в формате `ЧЧ:ММ`.\nПример: `18:00`",
-        parse_mode="Markdown",
+        parse_mode=None,
     )
 
 
@@ -949,7 +949,7 @@ async def admin_create_shift_start_time(message: types.Message, state: FSMContex
 async def admin_create_shift_end_time(message: types.Message, state: FSMContext):
     end_time = (message.text or "").strip()
     if not _is_hhmm(end_time):
-        await message.answer("❌ Неверный формат времени. Пример: `18:00`", parse_mode="Markdown")
+        await message.answer("❌ Неверный формат времени. Пример: `18:00`", parse_mode=None)
         return
     data = await state.get_data()
     start_time = (data.get("start_time") or "").strip()
@@ -974,7 +974,7 @@ async def admin_create_shift_location(message: types.Message, state: FSMContext)
         "🧭 *Шаг 5/7*\n"
         "Введите координаты площадки в формате `55.7522,37.6156`.\n"
         "Если контроль гео не нужен, отправьте `0`.",
-        parse_mode="Markdown",
+        parse_mode=None,
     )
 
 
@@ -987,7 +987,7 @@ async def admin_create_shift_coords(message: types.Message, state: FSMContext):
     except Exception:
         await message.answer(
             "❌ Неверный формат координат. Пример: `55.7522,37.6156` или `0` чтобы пропустить.",
-            parse_mode="Markdown",
+            parse_mode=None,
         )
         return
     if coords is None:
@@ -995,14 +995,14 @@ async def admin_create_shift_coords(message: types.Message, state: FSMContext):
         await state.set_state(ShiftCreation.rate)
         await message.answer(
             "💰 *Шаг 7/7*\nВведите ставку в рублях за час (только число).\nПример: `500`",
-            parse_mode="Markdown",
+            parse_mode=None,
         )
         return
     await state.update_data(expected_lat=coords[0], expected_lng=coords[1])
     await state.set_state(ShiftCreation.radius)
     await message.answer(
         "📐 *Шаг 6/7*\nВведите радиус допуска в метрах (например `300`).",
-        parse_mode="Markdown",
+        parse_mode=None,
     )
 
 
@@ -1011,7 +1011,7 @@ async def admin_create_shift_coords(message: types.Message, state: FSMContext):
 async def admin_create_shift_radius(message: types.Message, state: FSMContext):
     raw = (message.text or "").strip()
     if not raw.isdigit():
-        await message.answer("❌ Радиус должен быть числом, например `300`.", parse_mode="Markdown")
+        await message.answer("❌ Радиус должен быть числом, например `300`.", parse_mode=None)
         return
     radius = int(raw)
     if radius < 30 or radius > 3000:
@@ -1021,7 +1021,7 @@ async def admin_create_shift_radius(message: types.Message, state: FSMContext):
     await state.set_state(ShiftCreation.rate)
     await message.answer(
         "💰 *Шаг 7/7*\nВведите ставку в рублях за час (только число).\nПример: `500`",
-        parse_mode="Markdown",
+        parse_mode=None,
     )
 
 
@@ -1030,7 +1030,7 @@ async def admin_create_shift_radius(message: types.Message, state: FSMContext):
 async def admin_create_shift_finish(message: types.Message, state: FSMContext):
     rate_raw = (message.text or "").strip()
     if not rate_raw.isdigit():
-        await message.answer("❌ Ставка должна быть числом, например `500`.", parse_mode="Markdown")
+        await message.answer("❌ Ставка должна быть числом, например `500`.", parse_mode=None)
         return
     rate = int(rate_raw)
     if rate <= 0 or rate > 10000:
@@ -1071,7 +1071,7 @@ async def admin_create_shift_finish(message: types.Message, state: FSMContext):
             f"Локация: {data.get('location')}\n"
             f"Координаты/геоконтроль: {coords_line}\n"
             f"Ставка: `{rate}` ₽/час",
-            parse_mode="Markdown",
+            parse_mode=None,
         )
     except Exception as e:
         await message.answer(f"❌ Ошибка: {e}")
@@ -1114,7 +1114,7 @@ async def admin_assign_list_workers(callback: types.CallbackQuery):
     shift_id = int(callback.data.replace("assign_shift_", ""))
     workers = get_workers_assignable()
     if not workers:
-        await callback.message.edit_text("❌ Нет доступных исполнителей (кроме `rejected`).", parse_mode="Markdown")
+        await callback.message.edit_text("❌ Нет доступных исполнителей (кроме `rejected`).", parse_mode=None)
         await callback.answer()
         return
     keyboard = InlineKeyboardMarkup(
@@ -1146,8 +1146,8 @@ async def admin_do_assign(callback: types.CallbackQuery):
             worker_id,
             f"📌 Вас назначили на смену #{shift_id}.{shift_line}\n\nОткройте «Мои смены» и подтвердите выход.",
         )
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("admin_do_assign notify worker_id=%s shift_id=%s: %s", worker_id, shift_id, e, exc_info=True)
     await callback.message.edit_text(f"✅ Исполнитель `{worker_id}` назначен на смену #{shift_id}")
     await callback.answer()
 
@@ -1176,7 +1176,7 @@ async def admin_shift_manage_list(callback: types.CallbackQuery):
     rows.append([InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back")])
     await callback.message.edit_text(
         text,
-        parse_mode="Markdown",
+        parse_mode=None,
         reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
     )
     await callback.answer()
@@ -1300,6 +1300,6 @@ async def admin_back(callback: types.CallbackQuery, state: FSMContext):
         "• *Сервис* — демо-данные, БД\n\n"
         "Команда /admin — то же самое.",
         reply_markup=_admin_main_keyboard(),
-        parse_mode="Markdown",
+        parse_mode=None,
     )
     await callback.answer()

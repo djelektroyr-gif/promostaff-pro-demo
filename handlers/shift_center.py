@@ -2,7 +2,9 @@
 from aiogram import Router, F
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 
-from config import ADMIN_USER_ID
+from config import is_admin_user
+from .telegram_edit import safe_edit_or_resend
+
 from db import (
     get_shift_report,
     get_client,
@@ -128,7 +130,7 @@ async def shift_hub_open(callback: CallbackQuery):
             return
         include_pay = False
     elif viewer == "ad":
-        if uid != int(ADMIN_USER_ID):
+        if not is_admin_user(int(uid)):
             await callback.answer("Нет доступа.", show_alert=True)
             return
         include_pay = True
@@ -151,10 +153,11 @@ async def shift_hub_open(callback: CallbackQuery):
     project_id = int(shift[1]) if shift and shift[1] is not None else None
 
     text = format_shift_hub(rep, include_pay=include_pay)
-    await callback.message.edit_text(
+    await safe_edit_or_resend(
+        callback,
         text,
         reply_markup=_hub_keyboard(shift_id, viewer=viewer, project_id=project_id),
-        parse_mode="Markdown",
+        parse_mode=None,
     )
     await callback.answer()
 
@@ -163,7 +166,7 @@ async def shift_hub_open(callback: CallbackQuery):
 async def project_hub_open(callback: CallbackQuery):
     pid = int(callback.data.replace("project_hub_", ""))
     uid = callback.from_user.id
-    is_ad = uid == int(ADMIN_USER_ID)
+    is_ad = is_admin_user(int(uid))
     is_cl = bool(get_client(uid) and client_owns_project(uid, pid))
     is_wk = bool(get_worker(uid) and worker_assigned_to_project(uid, pid))
     if not (is_ad or is_cl or is_wk):
@@ -176,7 +179,7 @@ async def project_hub_open(callback: CallbackQuery):
         return
     pname = pr[1]
     shifts = get_shifts_by_project(pid)
-    text = f"*\u0413\u043b\u0430\u0432\u043d\u043e\u0435 \u043f\u043e \u043f\u0440\u043e\u0435\u043a\u0442\u0443 #{pid}*\n{pname}\n\n*\u0421\u043c\u0435\u043d\u044b:*\n"
+    text = f"\u0413\u043b\u0430\u0432\u043d\u043e\u0435 \u043f\u043e \u043f\u0440\u043e\u0435\u043a\u0442\u0443 #{pid}\n{pname}\n\n\u0421\u043c\u0435\u043d\u044b:\n"
     if not shifts:
         text += "\u041f\u043e\u043a\u0430 \u043d\u0435\u0442 \u0441\u043c\u0435\u043d.\n"
     rows = []
@@ -203,9 +206,10 @@ async def project_hub_open(callback: CallbackQuery):
     )
     back = "my_projects" if is_cl else "admin_back" if is_ad else "main_menu"
     rows.append([InlineKeyboardButton(text="\u041d\u0430\u0437\u0430\u0434", callback_data=back)])
-    await callback.message.edit_text(
+    await safe_edit_or_resend(
+        callback,
         text[:3900],
-        parse_mode="Markdown",
+        parse_mode=None,
         reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
     )
     await callback.answer()

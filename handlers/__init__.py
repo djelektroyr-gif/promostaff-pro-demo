@@ -9,4 +9,5 @@ routers = [
     admin.router,
     chat.router,
     tasks.router,
+    common.fallback_router,
 ]

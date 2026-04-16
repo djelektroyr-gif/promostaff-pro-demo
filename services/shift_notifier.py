@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from aiogram import Bot
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-from config import ADMIN_USER_ID, OVERDUE_TASK_ESCALATION_MINUTES
+from config import ADMIN_USER_IDS, OVERDUE_TASK_ESCALATION_MINUTES, PARSE_MODE_TELEGRAM
 from db import (
     list_assignments_for_scheduler,
     mark_assignment_event,
@@ -17,6 +17,7 @@ from db import (
     mark_overdue_task_escalated,
 )
 from services.delivery import send_message_with_retry
+from services.text_utils import bold, escape_markdown as em
 from services.time_utils import now_local_naive, shift_start_end_local_naive
 
 logger = logging.getLogger(__name__)
@@ -94,16 +95,24 @@ async def run_notifications_once(bot: Bot) -> None:
 
             # Мгновенное уведомление о назначении.
             if assigned_notify_sent_at is None:
+                assigned_body = (
+                    bold("Вас назначили на смену")
+                    + "\n\n"
+                    + em(f"Смена #{shift_id}")
+                    + "\n"
+                    + em(f"Дата: {format_date_ru(str(shift_date))}")
+                    + "\n"
+                    + em(f"Время: {start_time}-{end_time}")
+                    + "\n"
+                    + em(f"Локация: {location}")
+                    + "\n\n"
+                    + em("Подтвердите выход в карточке смены.")
+                )
                 await send_message_with_retry(
                     bot,
                     int(worker_id),
-                    "📌 *Вас назначили на смену*\n\n"
-                    f"Смена #{shift_id}\n"
-                    f"Дата: {format_date_ru(str(shift_date))}\n"
-                    f"Время: {start_time}-{end_time}\n"
-                    f"Локация: {location}\n\n"
-                    "Подтвердите выход в карточке смены.",
-                    parse_mode="Markdown",
+                    assigned_body,
+                    parse_mode=PARSE_MODE_TELEGRAM,
                     reply_markup=_kb_open_shift(int(shift_id)),
                     context=f"assigned:{assignment_id}",
                 )
@@ -144,7 +153,8 @@ async def run_notifications_once(bot: Bot) -> None:
                         f"⚠️ Исполнитель {worker_name or worker_id} не подтвердил выход на смену #{shift_id} спустя 1 час после 12ч-уведомления. "
                         "Свяжитесь с исполнителем и уточните готовность к выходу."
                     )
-                    await send_message_with_retry(bot, int(ADMIN_USER_ID), txt, context=f"escal11_admin:{assignment_id}")
+                    for aid in ADMIN_USER_IDS:
+                        await send_message_with_retry(bot, int(aid), txt, context=f"escal11_admin:{assignment_id}:{aid}")
                     if client_id:
                         await send_message_with_retry(bot, int(client_id), txt, context=f"escal11_client:{assignment_id}")
                     mark_assignment_event(int(assignment_id), "escalation_11h_sent_at")
@@ -163,7 +173,8 @@ async def run_notifications_once(bot: Bot) -> None:
                         f"⚠️ Исполнитель {worker_name or worker_id} не подтвердил выход на смену #{shift_id}. "
                         f"Старт: {format_date_ru(str(shift_date))} {start_time}."
                     )
-                    await send_message_with_retry(bot, int(ADMIN_USER_ID), txt, context=f"escal1_admin:{assignment_id}")
+                    for aid in ADMIN_USER_IDS:
+                        await send_message_with_retry(bot, int(aid), txt, context=f"escal1_admin:{assignment_id}:{aid}")
                     if client_id:
                         await send_message_with_retry(bot, int(client_id), txt, context=f"escal1_client:{assignment_id}")
                     await send_message_with_retry(
@@ -186,12 +197,18 @@ async def run_notifications_once(bot: Bot) -> None:
                 await send_message_with_retry(
                     bot,
                     int(worker_id),
-                    "📅 *Напоминание о смене*\n\n"
-                    f"До старта смены *#{shift_id}* осталось около *{h}ч {m}м*.\n"
-                    f"📆 {format_date_ru(str(shift_date))} {start_time}–{end_time}\n"
-                    f"📍 {location}\n\n"
-                    "Вы уже подтвердили выход. За *30 минут* до начала бот напомнит про *чек-ин* (геолокация и селфи).",
-                    parse_mode="Markdown",
+                    bold("Напоминание о смене")
+                    + "\n\n"
+                    + em(f"До старта смены #{shift_id} осталось около {h}ч {m}м.")
+                    + "\n"
+                    + em(f"📆 {format_date_ru(str(shift_date))} {start_time}–{end_time}")
+                    + "\n"
+                    + em(f"📍 {location}")
+                    + "\n\n"
+                    + em(
+                        "Вы уже подтвердили выход. За 30 минут до начала бот напомнит про чек-ин (геолокация и селфи)."
+                    ),
+                    parse_mode=PARSE_MODE_TELEGRAM,
                     reply_markup=_kb_open_shift(int(shift_id)),
                     context=f"conf_shift_12h:{assignment_id}",
                 )
@@ -206,12 +223,16 @@ async def run_notifications_once(bot: Bot) -> None:
                 await send_message_with_retry(
                     bot,
                     int(worker_id),
-                    "📅 *Напоминание о смене*\n\n"
-                    f"До старта смены *#{shift_id}* осталось около *{h}ч {m}м*.\n"
-                    f"📆 {format_date_ru(str(shift_date))} {start_time}–{end_time}\n"
-                    f"📍 {location}\n\n"
-                    "Скоро откроется чек-ин: *геолокация*, затем *фото*. Откройте смену в боте и следуйте шагам.",
-                    parse_mode="Markdown",
+                    bold("Напоминание о смене")
+                    + "\n\n"
+                    + em(f"До старта смены #{shift_id} осталось около {h}ч {m}м.")
+                    + "\n"
+                    + em(f"📆 {format_date_ru(str(shift_date))} {start_time}–{end_time}")
+                    + "\n"
+                    + em(f"📍 {location}")
+                    + "\n\n"
+                    + em("Скоро откроется чек-ин: геолокация, затем фото. Откройте смену в боте и следуйте шагам."),
+                    parse_mode=PARSE_MODE_TELEGRAM,
                     reply_markup=_kb_open_shift(int(shift_id)),
                     context=f"conf_shift_3h:{assignment_id}",
                 )
@@ -241,7 +262,8 @@ async def run_notifications_once(bot: Bot) -> None:
                     f"⚠️ По смене #{shift_id} нет чек-ина к старту. "
                     f"Исполнитель {worker_name or worker_id} отмечается как опаздывающий."
                 )
-                await send_message_with_retry(bot, int(ADMIN_USER_ID), txt, context=f"nocheckin_admin:{assignment_id}")
+                for aid in ADMIN_USER_IDS:
+                    await send_message_with_retry(bot, int(aid), txt, context=f"nocheckin_admin:{assignment_id}:{aid}")
                 if client_id:
                     await send_message_with_retry(bot, int(client_id), txt, context=f"nocheckin_client:{assignment_id}")
                 await send_message_with_retry(
@@ -285,7 +307,8 @@ async def run_notifications_once(bot: Bot) -> None:
                     f"⚠️ Исполнитель {worker_name or worker_id} не выполнил чек-аут по смене #{shift_id}. "
                     "Ждём действие (закрыть/продлить)."
                 )
-                await send_message_with_retry(bot, int(ADMIN_USER_ID), msg, context=f"forgot_checkout_admin:{assignment_id}")
+                for aid in ADMIN_USER_IDS:
+                    await send_message_with_retry(bot, int(aid), msg, context=f"forgot_checkout_admin:{assignment_id}:{aid}")
                 if client_id:
                     await send_message_with_retry(bot, int(client_id), msg, context=f"forgot_checkout_client:{assignment_id}")
                 mark_assignment_event(int(assignment_id), "forgot_checkout_sent_at")
@@ -310,12 +333,13 @@ async def run_notifications_once(bot: Bot) -> None:
                     f"Открытые задачи:\n{preview}\n\n"
                     "Рекомендуем связаться с исполнителем или назначить замену."
                 )
-                await send_message_with_retry(
-                    bot,
-                    int(ADMIN_USER_ID),
-                    text,
-                    context=f"overdue_escal_admin:{ping_id}",
-                )
+                for aid in ADMIN_USER_IDS:
+                    await send_message_with_retry(
+                        bot,
+                        int(aid),
+                        text,
+                        context=f"overdue_escal_admin:{ping_id}:{aid}",
+                    )
                 if client_id:
                     await send_message_with_retry(
                         bot,

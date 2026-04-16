@@ -3,7 +3,7 @@ from aiogram import Router, F, types
 from aiogram.fsm.context import FSMContext
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-from config import ADMIN_USER_ID
+from config import is_admin_user
 from db import (
     save_chat_message,
     get_chat_messages,
@@ -20,11 +20,13 @@ from db import (
 )
 from states import ChatMessageState, ProjectChatState
 
+from .telegram_edit import safe_edit_or_resend
+
 router = Router()
 
 
 def get_user_display_name(user_id: int) -> str:
-    if int(user_id) == int(ADMIN_USER_ID):
+    if is_admin_user(int(user_id)):
         return "Координатор PROMOSTAFF"
     worker = get_worker(user_id)
     if worker:
@@ -41,7 +43,7 @@ def get_user_display_name(user_id: int) -> str:
 
 
 def _can_access_shift_chat(user_id: int, shift_id: int) -> bool:
-    if int(user_id) == int(ADMIN_USER_ID):
+    if is_admin_user(int(user_id)):
         return True
     if get_client(user_id) and client_owns_shift(user_id, shift_id):
         return True
@@ -51,7 +53,7 @@ def _can_access_shift_chat(user_id: int, shift_id: int) -> bool:
 
 
 def _can_access_project_chat(user_id: int, project_id: int) -> bool:
-    if int(user_id) == int(ADMIN_USER_ID):
+    if is_admin_user(int(user_id)):
         return True
     if get_client(user_id) and client_owns_project(user_id, project_id):
         return True
@@ -79,14 +81,14 @@ async def open_project_chat(callback: types.CallbackQuery, state: FSMContext):
     messages = get_project_chat_messages(project_id, limit=15)
     sep = "━" * 16
     text = (
-        f"💬 *ЧАТ ПРОЕКТА #{project_id}*\n\n"
+        f"💬 ЧАТ ПРОЕКТА #{project_id}\n\n"
         f"{pr[1]}\n\n{sep}\n"
     )
     if messages:
         for msg in reversed(messages):
-            text += f"*{msg[0]}*: {msg[1]}\n"
+            text += f"{msg[0]}: {msg[1]}\n"
     else:
-        text += "_Сообщений пока нет._\n"
+        text += "Сообщений пока нет.\n"
     text += sep
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
@@ -95,7 +97,7 @@ async def open_project_chat(callback: types.CallbackQuery, state: FSMContext):
             [InlineKeyboardButton(text="🔙 К проекту", callback_data=f"project_hub_{project_id}")],
         ]
     )
-    await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="Markdown")
+    await safe_edit_or_resend(callback, text, reply_markup=keyboard, parse_mode=None)
     await callback.answer()
 
 
@@ -141,7 +143,7 @@ async def open_chat(callback: types.CallbackQuery, state: FSMContext):
     user_id = callback.from_user.id
     shift = get_shift(shift_id)
     if not shift:
-        await callback.message.edit_text("❌ Смена не найдена.")
+        await safe_edit_or_resend(callback, "❌ Смена не найдена.")
         await callback.answer()
         return
 
@@ -153,18 +155,18 @@ async def open_chat(callback: types.CallbackQuery, state: FSMContext):
     messages = get_chat_messages(shift_id, limit=15)
     sep = "━" * 16
     text = (
-        f"💬 *ЧАТ СМЕНЫ #{shift_id}*\n\n"
+        f"💬 ЧАТ СМЕНЫ #{shift_id}\n\n"
         f"📆 {shift[2]} | {shift[3]}-{shift[4]}\n📍 {shift[5]}\n\n{sep}\n"
     )
     if messages:
         for msg in reversed(messages):
-            text += f"*{msg[0]}*: {msg[1]}\n"
+            text += f"{msg[0]}: {msg[1]}\n"
     else:
-        text += "_Сообщений пока нет._\n"
+        text += "Сообщений пока нет.\n"
     text += sep
-    is_admin = int(user_id) == int(ADMIN_USER_ID)
+    is_admin = is_admin_user(int(user_id))
     if is_admin:
-        text += "\n_Вы вошли как координатор — можете писать в этот чат (кнопка «Написать»)._"
+        text += "\nВы вошли как координатор — можете писать в этот чат (кнопка «Написать»)."
     is_client = get_client(user_id) is not None
     if is_admin:
         back_callback = f"shift_hub_ad_{shift_id}"
@@ -196,7 +198,7 @@ async def open_chat(callback: types.CallbackQuery, state: FSMContext):
             [InlineKeyboardButton(text="🔙 Назад", callback_data=back_callback)],
         ]
     )
-    await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="Markdown")
+    await safe_edit_or_resend(callback, text, reply_markup=keyboard, parse_mode=None)
     await callback.answer()
 
 
@@ -210,8 +212,8 @@ async def prompt_chat_message(callback: types.CallbackQuery, state: FSMContext):
     await state.update_data(current_chat_shift=shift_id)
     await state.set_state(ChatMessageState.waiting_for_message)
     await callback.message.answer(
-        "✏️ Напишите сообщение для чата *одним текстом* (можно вставить ссылку). Стикеры и фото сюда не сохраняются.",
-        parse_mode="Markdown",
+        "✏️ Напишите сообщение для чата одним текстом (можно вставить ссылку). Стикеры и фото сюда не сохраняются.",
+        parse_mode=None,
     )
     await callback.answer()
 

@@ -3,20 +3,23 @@ from aiogram import Router, F, types
 from aiogram.fsm.context import FSMContext
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 
-from config import ADMIN_USER_ID
+from config import is_admin_user
 from db import save_worker, save_client
 from keyboards.menus import main_menu_keyboard, professions_keyboard, confirm_keyboard
 from states import WorkerRegistration, ClientRegistration
+
+from .telegram_edit import safe_edit_or_resend
 
 router = Router()
 
 # ========== РЕГИСТРАЦИЯ ИСПОЛНИТЕЛЯ ==========
 @router.callback_query(F.data == "register_worker")
 async def start_worker_reg(callback: types.CallbackQuery, state: FSMContext):
-    await callback.message.edit_text(
-        "👷 *Регистрация исполнителя*\n\n"
+    await safe_edit_or_resend(
+        callback,
+        "👷 Регистрация исполнителя\n\n"
         "Шаг 1/3: Введите ваше полное ФИО:",
-        parse_mode="Markdown"
+        parse_mode=None,
     )
     await state.set_state(WorkerRegistration.full_name)
     await callback.answer()
@@ -70,14 +73,14 @@ async def process_worker_profession(callback: types.CallbackQuery, state: FSMCon
     data = await state.get_data()
     
     text = (
-        "📋 *Проверьте данные:*\n\n"
+        "📋 Проверьте данные:\n\n"
         f"👤 ФИО: {data['full_name']}\n"
         f"📞 Телефон: {data['phone']}\n"
         f"💼 Профессия: {profession}\n\n"
         "Всё верно?"
     )
     
-    await callback.message.edit_text(text, reply_markup=confirm_keyboard(), parse_mode="Markdown")
+    await safe_edit_or_resend(callback, text, reply_markup=confirm_keyboard(), parse_mode=None)
     await state.set_state(WorkerRegistration.confirm)
     await callback.answer()
 
@@ -86,21 +89,22 @@ async def confirm_worker_reg(callback: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
     save_worker(callback.from_user.id, data)
     
-    await callback.message.edit_text(
-        "✅ *Регистрация завершена!*\n\n"
+    await safe_edit_or_resend(
+        callback,
+        "✅ Регистрация завершена!\n\n"
         "Теперь вы можете получать смены и работать.",
-        parse_mode="Markdown"
+        parse_mode=None,
     )
     await state.clear()
     
     uid = callback.from_user.id
     await callback.message.answer(
-        f"👷 *{data['full_name']}*\n\nВыберите действие:",
+        f"👷 {data['full_name']}\n\nВыберите действие:",
         reply_markup=main_menu_keyboard(
             is_worker=True,
-            is_admin=int(uid) == int(ADMIN_USER_ID),
+            is_admin=is_admin_user(int(uid)),
         ),
-        parse_mode="Markdown"
+        parse_mode=None
     )
     await callback.answer()
 
@@ -112,10 +116,11 @@ async def edit_worker_reg(callback: types.CallbackQuery, state: FSMContext):
 # ========== РЕГИСТРАЦИЯ ЗАКАЗЧИКА ==========
 @router.callback_query(F.data == "register_client")
 async def start_client_reg(callback: types.CallbackQuery, state: FSMContext):
-    await callback.message.edit_text(
-        "🏢 *Регистрация заказчика*\n\n"
+    await safe_edit_or_resend(
+        callback,
+        "🏢 Регистрация заказчика\n\n"
         "Шаг 1/3: Введите название компании:",
-        parse_mode="Markdown"
+        parse_mode=None,
     )
     await state.set_state(ClientRegistration.company_name)
     await callback.answer()
@@ -150,22 +155,22 @@ async def process_client_phone(message: types.Message, state: FSMContext):
     })
     
     await message.answer(
-        f"✅ *Регистрация завершена!*\n\n"
+        f"✅ Регистрация завершена!\n\n"
         f"🏢 {data['company_name']}\n"
         f"👤 {data['contact_name']}",
         reply_markup=ReplyKeyboardRemove(),
-        parse_mode="Markdown"
+        parse_mode=None
     )
     await state.clear()
     
     uid = message.from_user.id
     await message.answer(
-        f"🏢 *{data['contact_name']} ({data['company_name']})*\n\nВыберите действие:",
+        f"🏢 {data['contact_name']} ({data['company_name']})\n\nВыберите действие:",
         reply_markup=main_menu_keyboard(
             is_client=True,
-            is_admin=int(uid) == int(ADMIN_USER_ID),
+            is_admin=is_admin_user(int(uid)),
         ),
-        parse_mode="Markdown"
+        parse_mode=None
     )
 
 @router.message(ClientRegistration.phone, F.text)
@@ -177,20 +182,20 @@ async def process_client_phone_text(message: types.Message, state: FSMContext):
     })
     
     await message.answer(
-        f"✅ *Регистрация завершена!*\n\n"
+        f"✅ Регистрация завершена!\n\n"
         f"🏢 {data['company_name']}\n"
         f"👤 {data['contact_name']}",
         reply_markup=ReplyKeyboardRemove(),
-        parse_mode="Markdown"
+        parse_mode=None
     )
     await state.clear()
     
     uid = message.from_user.id
     await message.answer(
-        f"🏢 *{data['contact_name']} ({data['company_name']})*\n\nВыберите действие:",
+        f"🏢 {data['contact_name']} ({data['company_name']})\n\nВыберите действие:",
         reply_markup=main_menu_keyboard(
             is_client=True,
-            is_admin=int(uid) == int(ADMIN_USER_ID),
+            is_admin=is_admin_user(int(uid)),
         ),
-        parse_mode="Markdown"
+        parse_mode=None
     )

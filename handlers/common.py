@@ -1,10 +1,14 @@
 # handlers/common.py
+from __future__ import annotations
+
+import logging
+
 from aiogram import Router, F, types
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-from config import ADMIN_USER_ID
+from config import PARSE_MODE_TELEGRAM, is_admin_user
 from db import get_worker, get_client
 from keyboards.menus import (
     main_menu_keyboard,
@@ -13,9 +17,16 @@ from keyboards.menus import (
     client_tasks_keyboard,
     client_comms_keyboard,
 )
+from services.text_utils import bold, escape_markdown as em
 from states import WorkerRegistration, ClientRegistration
 
+from .telegram_edit import safe_edit_or_resend
+
+logger = logging.getLogger(__name__)
+
 router = Router()
+# Регистрируется последним в handlers/__init__.py — не перехватывает шаги FSM других роутеров.
+fallback_router = Router()
 
 
 def _start_payload(text: str) -> str:
@@ -32,7 +43,6 @@ async def _send_group_onboarding(message: types.Message) -> None:
         worker_link = f"https://t.me/{username}?start=register_worker"
         client_link = f"https://t.me/{username}?start=register_client"
     else:
-        # fallback, если username не задан
         worker_link = "https://t.me/"
         client_link = "https://t.me/"
     keyboard = InlineKeyboardMarkup(
@@ -41,17 +51,26 @@ async def _send_group_onboarding(message: types.Message) -> None:
             [InlineKeyboardButton(text="🏢 Я заказчик", url=client_link)],
         ]
     )
-    await message.answer(
-        "👋 Добрый день! Я помощник *PROMOSTAFF* для тестового проекта.\n\n"
-        "Чем могу помочь:\n"
-        "• регистрация заказчика и исполнителей;\n"
-        "• доступ к сменам, задачам, чату и отчётам;\n"
-        "• быстрый вход в нужный сценарий по кнопкам ниже.\n\n"
-        "Если приветствие пропало: в этом чате можно написать команду /start или /promostaff "
-        "(с косой чертой в начале, как обычная команда в Telegram).",
-        parse_mode="Markdown",
-        reply_markup=keyboard,
+    body = (
+        em("👋 Добрый день! Я помощник PROMOSTAFF для тестового проекта.")
+        + "\n\n"
+        + em("Чем могу помочь:")
+        + "\n"
+        + "• "
+        + em("регистрация заказчика и исполнителей;")
+        + "\n"
+        + "• "
+        + em("доступ к сменам, задачам, чату и отчётам;")
+        + "\n"
+        + "• "
+        + em("быстрый вход в нужный сценарий по кнопкам ниже.")
+        + "\n\n"
+        + em(
+            "Если приветствие пропало: в этом чате можно написать команду /start или /promostaff "
+            "(с косой чертой в начале, как обычная команда в Telegram)."
+        )
     )
+    await message.answer(body, parse_mode=PARSE_MODE_TELEGRAM, reply_markup=keyboard)
 
 
 @router.message(Command("start"))
@@ -62,75 +81,78 @@ async def start_cmd(message: types.Message, state: FSMContext):
 
     user_id = message.from_user.id
     payload = _start_payload(message.text or "")
-    is_admin = int(user_id) == int(ADMIN_USER_ID)
+    admin = is_admin_user(user_id)
 
-    # Проверяем, зарегистрирован ли пользователь
     worker = get_worker(user_id)
     client = get_client(user_id)
 
     if not worker and not client and payload == "register_worker":
         await state.clear()
         await message.answer(
-            "👷 *Регистрация исполнителя*\n\n"
-            "Шаг 1/3: Введите ваше полное ФИО:",
-            parse_mode="Markdown",
+            bold("Регистрация исполнителя") + "\n\n" + em("Шаг 1/3: Введите ваше полное ФИО:"),
+            parse_mode=PARSE_MODE_TELEGRAM,
         )
         await state.set_state(WorkerRegistration.full_name)
         return
     if not worker and not client and payload == "register_client":
         await state.clear()
         await message.answer(
-            "🏢 *Регистрация заказчика*\n\n"
-            "Шаг 1/3: Введите название компании:",
-            parse_mode="Markdown",
+            bold("Регистрация заказчика") + "\n\n" + em("Шаг 1/3: Введите название компании:"),
+            parse_mode=PARSE_MODE_TELEGRAM,
         )
         await state.set_state(ClientRegistration.company_name)
         return
 
-    if is_admin:
-        title = (
-            f"🔐 *Администратор*\n\n"
-            if not worker and not client
-            else f"🔐 *Администратор* / "
-            f"{'исполнитель' if worker else 'заказчик' if client else 'гость'}\n\n"
-        )
+    if admin:
+        if not worker and not client:
+            title = bold("Администратор") + "\n\n"
+        else:
+            role = "исполнитель" if worker else "заказчик" if client else "гость"
+            title = bold(f"Администратор / {role}") + "\n\n"
         await message.answer(
-            title + "Выберите действие:",
+            title + em("Выберите действие:"),
             reply_markup=main_menu_keyboard(
                 is_client=bool(client),
                 is_worker=bool(worker),
                 is_admin=True,
             ),
-            parse_mode="Markdown",
+            parse_mode=PARSE_MODE_TELEGRAM,
         )
     elif worker:
         await message.answer(
-            f"👷 *Добро пожаловать, {worker[1]}!*\n\n"
-            "Вы зарегистрированы как исполнитель.\n"
-            "Выберите действие:",
+            "👷 "
+            + bold(f"Добро пожаловать, {worker[1]}!")
+            + "\n\n"
+            + em("Вы зарегистрированы как исполнитель.")
+            + "\n"
+            + em("Выберите действие:"),
             reply_markup=main_menu_keyboard(is_worker=True),
-            parse_mode="Markdown"
+            parse_mode=PARSE_MODE_TELEGRAM,
         )
     elif client:
         await message.answer(
-            f"🏢 *Добро пожаловать, {client[2]}!*\n\n"
-            f"Компания: {client[1]}\n"
-            "Выберите действие:",
+            "🏢 "
+            + bold(f"Добро пожаловать, {client[2]}!")
+            + "\n\n"
+            + em(f"Компания: {client[1]}")
+            + "\n"
+            + em("Выберите действие:"),
             reply_markup=main_menu_keyboard(is_client=True),
-            parse_mode="Markdown"
+            parse_mode=PARSE_MODE_TELEGRAM,
         )
     else:
         await message.answer(
-            "🌟 *Добро пожаловать в PROMOSTAFF DEMO!*\n\n"
-            "Выберите вашу роль:",
+            "🌟 "
+            + bold("Добро пожаловать в PROMOSTAFF DEMO!")
+            + "\n\n"
+            + em("Выберите вашу роль:"),
             reply_markup=main_menu_keyboard(),
-            parse_mode="Markdown"
+            parse_mode=PARSE_MODE_TELEGRAM,
         )
 
 
 @router.message(F.new_chat_members)
 async def group_bot_added(message: types.Message):
-    # Приветствие только когда в группу добавили именно этого бота.
     me = await message.bot.get_me()
     added_ids = {u.id for u in (message.new_chat_members or [])}
     if me.id not in added_ids:
@@ -150,24 +172,24 @@ async def show_main_menu(callback: types.CallbackQuery):
     user_id = callback.from_user.id
     worker = get_worker(user_id)
     client = get_client(user_id)
-    is_admin = int(user_id) == int(ADMIN_USER_ID)
+    admin = is_admin_user(user_id)
 
-    if is_admin:
-        text = "🔐 *Главное меню*\n\nВыберите действие:"
+    if admin:
+        text = bold("Главное меню") + "\n\n" + em("Выберите действие:")
         markup = main_menu_keyboard(
             is_client=bool(client), is_worker=bool(worker), is_admin=True
         )
     elif worker:
-        text = f"👷 *{worker[1]}*\n\nВыберите действие:"
+        text = "👷 " + bold(str(worker[1])) + "\n\n" + em("Выберите действие:")
         markup = main_menu_keyboard(is_worker=True)
     elif client:
-        text = f"🏢 *{client[2]}* ({client[1]})\n\nВыберите действие:"
+        text = "🏢 " + bold(str(client[2])) + " (" + em(str(client[1])) + ")\n\n" + em("Выберите действие:")
         markup = main_menu_keyboard(is_client=True)
     else:
-        text = "🌟 *Добро пожаловать!*\n\nВыберите вашу роль:"
+        text = "🌟 " + bold("Добро пожаловать!") + "\n\n" + em("Выберите вашу роль:")
         markup = main_menu_keyboard()
 
-    await callback.message.edit_text(text, reply_markup=markup, parse_mode="Markdown")
+    await safe_edit_or_resend(callback, text, reply_markup=markup, parse_mode=PARSE_MODE_TELEGRAM)
     await callback.answer()
 
 
@@ -176,11 +198,14 @@ async def client_menu_overview(callback: types.CallbackQuery):
     if not get_client(callback.from_user.id):
         await callback.answer("Только для заказчика.", show_alert=True)
         return
-    await callback.message.edit_text(
-        "📊 *Обзор заказчика*\n\n"
-        "Здесь — ваши *проекты*. Смены создаёт администратор; вы смотрите людей, ставите задачи и читаете отчёты.\n\n"
-        "Дальше нажмите нужную кнопку внизу.",
-        parse_mode="Markdown",
+    await safe_edit_or_resend(
+        callback,
+        bold("Обзор заказчика")
+        + "\n\n"
+        + em("Здесь — ваши проекты. Смены создаёт администратор; вы смотрите людей, ставите задачи и читаете отчёты.")
+        + "\n\n"
+        + em("Дальше нажмите нужную кнопку внизу."),
+        parse_mode=PARSE_MODE_TELEGRAM,
         reply_markup=client_overview_keyboard(),
     )
     await callback.answer()
@@ -191,12 +216,18 @@ async def client_menu_shifts(callback: types.CallbackQuery):
     if not get_client(callback.from_user.id):
         await callback.answer("Только для заказчика.", show_alert=True)
         return
-    await callback.message.edit_text(
-        "🗓 *Смены*\n\n"
-        "• *Мои смены* — карточки по датам.\n"
-        "• *Кто подтвердил выход* — сводка по всем сменам.\n\n"
-        "Чек-ины и чек-ауты исполнители делают сами в боте.",
-        parse_mode="Markdown",
+    await safe_edit_or_resend(
+        callback,
+        bold("Смены")
+        + "\n\n"
+        + "• "
+        + em("Мои смены — карточки по датам.")
+        + "\n"
+        + "• "
+        + em("Кто подтвердил выход — сводка по всем сменам.")
+        + "\n\n"
+        + em("Чек-ины и чек-ауты исполнители делают сами в боте."),
+        parse_mode=PARSE_MODE_TELEGRAM,
         reply_markup=client_shifts_keyboard(),
     )
     await callback.answer()
@@ -207,13 +238,21 @@ async def client_menu_tasks(callback: types.CallbackQuery):
     if not get_client(callback.from_user.id):
         await callback.answer("Только для заказчика.", show_alert=True)
         return
-    await callback.message.edit_text(
-        "📋 *Задачи для исполнителей*\n\n"
-        "1) Нажмите *«Новая задача для исполнителя»*.\n"
-        "2) Выберите смену → введите название и описание.\n"
-        "3) Укажите, кому на смене отправить — люди получат уведомление.\n\n"
-        "«Смотреть все задачи» — список и оценки после выполнения.",
-        parse_mode="Markdown",
+    await safe_edit_or_resend(
+        callback,
+        bold("Задачи для исполнителей")
+        + "\n\n"
+        + "1) "
+        + em('Нажмите «Новая задача для исполнителя».')
+        + "\n"
+        + "2) "
+        + em("Выберите смену → введите название и описание.")
+        + "\n"
+        + "3) "
+        + em("Укажите, кому на смене отправить — люди получат уведомление.")
+        + "\n\n"
+        + em('«Смотреть все задачи» — список и оценки после выполнения.'),
+        parse_mode=PARSE_MODE_TELEGRAM,
         reply_markup=client_tasks_keyboard(),
     )
     await callback.answer()
@@ -224,12 +263,33 @@ async def client_menu_comms(callback: types.CallbackQuery):
     if not get_client(callback.from_user.id):
         await callback.answer("Только для заказчика.", show_alert=True)
         return
-    await callback.message.edit_text(
-        "💬 *Связь*\n\n"
-        "• *Чаты смен* — общий чат по каждой смене.\n"
-        "• *Кто подтвердил выход* — если нужно уточнить состав.\n\n"
-        "Писать исполнителю лично можно из карточки смены (кнопка «Написать»).",
-        parse_mode="Markdown",
+    await safe_edit_or_resend(
+        callback,
+        bold("Связь")
+        + "\n\n"
+        + "• "
+        + em("Чаты смен — общий чат по каждой смене.")
+        + "\n"
+        + "• "
+        + em("Кто подтвердил выход — если нужно уточнить состав.")
+        + "\n\n"
+        + em('Писать исполнителю лично можно из карточки смены (кнопка «Написать»).'),
+        parse_mode=PARSE_MODE_TELEGRAM,
         reply_markup=client_comms_keyboard(),
     )
     await callback.answer()
+
+
+@fallback_router.message(F.chat.type == "private")
+async def fsm_or_start_hint(message: types.Message, state: FSMContext):
+    st = await state.get_state()
+    if st:
+        await message.answer(
+            em("Бот ждёт от вас ввод по текущему шагу. Завершите шаг или отправьте /start для сброса и главного меню."),
+            parse_mode=PARSE_MODE_TELEGRAM,
+        )
+        return
+    await message.answer(
+        em("Команда не распознана. Отправьте /start, чтобы открыть главное меню."),
+        parse_mode=PARSE_MODE_TELEGRAM,
+    )

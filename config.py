@@ -1,8 +1,14 @@
 # config.py
+from __future__ import annotations
+
 import os
+from pathlib import Path
+
 from dotenv import load_dotenv
 
 load_dotenv()
+
+_BASE_DIR = Path(__file__).resolve().parent
 
 # Токен: BotHost/Timeweb часто дублируют одно значение в BOT_TOKEN / TELEGRAM_BOT_TOKEN / TOKEN.
 _raw_token = (
@@ -14,17 +20,52 @@ BOT_TOKEN = _raw_token or None
 if not BOT_TOKEN:
     raise ValueError("❌ BOT_TOKEN не установлен в переменных окружения!")
 
-# ID администратора (вы)
-ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID", "0"))
-if ADMIN_USER_ID == 0:
-    raise ValueError("❌ ADMIN_USER_ID не установлен в переменных окружения!")
+
+def _parse_admin_ids() -> frozenset[int]:
+    ids: set[int] = set()
+    raw = (os.getenv("ADMIN_USER_IDS") or "").strip()
+    if raw:
+        for part in raw.replace(";", ",").split(","):
+            p = part.strip()
+            if not p:
+                continue
+            try:
+                ids.add(int(p))
+            except ValueError:
+                continue
+    legacy = (os.getenv("ADMIN_USER_ID") or "").strip()
+    if legacy:
+        try:
+            ids.add(int(legacy))
+        except ValueError:
+            pass
+    return frozenset(ids)
+
+
+ADMIN_USER_IDS: frozenset[int] = _parse_admin_ids()
+if not ADMIN_USER_IDS:
+    raise ValueError(
+        "❌ Задайте ADMIN_USER_IDS (через запятую) или хотя бы ADMIN_USER_ID в переменных окружения!"
+    )
+
+# Первый ID для обратной совместимости с кодом, ожидающим один «главный» адресат.
+ADMIN_USER_ID: int = min(ADMIN_USER_IDS)
+
+
+def is_admin_user(user_id: int | None) -> bool:
+    if user_id is None:
+        return False
+    return int(user_id) in ADMIN_USER_IDS
+
 
 # Настройки проекта
 PROJECT_NAME = "Демо-проект PROMOSTAFF"
 DEFAULT_RATE = 500  # ставка ₽/час
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 APP_TIMEZONE = os.getenv("APP_TIMEZONE", "Europe/Moscow").strip() or "Europe/Moscow"
-FSM_DB_PATH = os.getenv("FSM_DB_PATH", "promostaff_fsm.db").strip() or "promostaff_fsm.db"
+
+_fsm_env = (os.getenv("FSM_DB_PATH") or "").strip()
+FSM_DB_PATH = str(_BASE_DIR / "promostaff_fsm.db") if not _fsm_env else _fsm_env
 
 # Планировщик
 SCHEDULER_POLL_INTERVAL_SEC = int(os.getenv("SCHEDULER_POLL_INTERVAL_SEC", "60"))
@@ -48,3 +89,6 @@ REMINDER_3H = 3
 
 # Эскалация после пинга просроченных задач (в минутах)
 OVERDUE_TASK_ESCALATION_MINUTES = int(os.getenv("OVERDUE_TASK_ESCALATION_MINUTES", "30"))
+
+# Режим разметки по умолчанию для исходящих сообщений бота
+PARSE_MODE_TELEGRAM = "MarkdownV2"

@@ -53,7 +53,6 @@ def confirm_keyboard():
 def shift_actions_keyboard(shift_id: int, is_client: bool = False):
     buttons = []
     if is_client:
-        buttons.append([InlineKeyboardButton(text="👥 Назначить исполнителей", callback_data=f"assign_{shift_id}")])
         buttons.append(
             [InlineKeyboardButton(text="📝 Задача исполнителям", callback_data=f"add_task_{shift_id}")]
         )
