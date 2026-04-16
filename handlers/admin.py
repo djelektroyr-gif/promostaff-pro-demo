@@ -131,9 +131,10 @@ def _admin_service_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-@router.message(Command("admin"))
+@router.message(StateFilter("*"), Command("admin"))
 @admin_only
-async def admin_panel(message: types.Message):
+async def admin_panel(message: types.Message, state: FSMContext):
+    await state.clear()
     await message.answer(
         "🔐 *Админ-панель DEMO*\n\n"
         "Коротко, куда жать:\n"

@@ -26,6 +26,7 @@ from db import (
     set_task_client_rating,
 )
 from services.text_utils import bold, escape_markdown as em
+from services.admin_broadcast import send_all_admins
 from states import TaskCreation, TaskCompletion
 
 router = Router()
@@ -164,6 +165,14 @@ async def _notify_client_task_completed(
     except Exception as e:
         logger.warning("_notify_client_task_completed failed cid=%s: %s", cid, e, exc_info=True)
         await bot.send_message(cid, body, parse_mode=PARSE_MODE_TELEGRAM)
+    try:
+        await send_all_admins(
+            bot,
+            f"✅ Выполнена задача по смене #{shift_id}\n\n{title}\nКомментарий: {report_text or '—'}",
+            parse_mode=None,
+        )
+    except Exception as e:
+        logger.warning("_notify_client_task_completed to admins failed shift_id=%s: %s", shift_id, e, exc_info=True)
 
 
 @router.callback_query(F.data == "my_client_tasks")

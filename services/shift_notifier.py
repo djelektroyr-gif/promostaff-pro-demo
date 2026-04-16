@@ -21,6 +21,7 @@ from services.text_utils import bold, escape_markdown as em
 from services.time_utils import now_local_naive, shift_start_end_local_naive
 
 logger = logging.getLogger(__name__)
+REMINDER_WINDOW_SEC = 15 * 60
 
 
 def _kb_open_shift(shift_id: int) -> InlineKeyboardMarkup:
@@ -52,6 +53,10 @@ def _to_dt(value) -> datetime | None:
         return datetime.fromisoformat(s)
     except Exception:
         return None
+
+
+def _in_window(to_event_sec: float, target_sec: int, window_sec: int = REMINDER_WINDOW_SEC) -> bool:
+    return (target_sec - window_sec) < to_event_sec <= target_sec
 
 
 async def run_notifications_once(bot: Bot) -> None:
@@ -120,7 +125,7 @@ async def run_notifications_once(bot: Bot) -> None:
 
             # Напоминания о подтверждении.
             if status == "pending":
-                if reminder_12h_sent_at is None and 0 < to_start <= 12 * 3600:
+                if reminder_12h_sent_at is None and _in_window(to_start, 12 * 3600):
                     await send_message_with_retry(
                         bot,
                         int(worker_id),
@@ -148,7 +153,12 @@ async def run_notifications_once(bot: Bot) -> None:
                         context=f"rem12_repeat:{assignment_id}",
                     )
                     mark_assignment_event(int(assignment_id), "reminder_12h_repeat_last_at")
-                if escalation_11h_sent_at is None and no_confirm_flagged_at is None and 0 < to_start <= 11 * 3600:
+                if (
+                    escalation_11h_sent_at is None
+                    and no_confirm_flagged_at is None
+                    and reminder_12h_sent_at is not None
+                    and _in_window(to_start, 11 * 3600)
+                ):
                     txt = (
                         f"⚠️ Исполнитель {worker_name or worker_id} не подтвердил выход на смену #{shift_id} спустя 1 час после 12ч-уведомления. "
                         "Свяжитесь с исполнителем и уточните готовность к выходу."
@@ -159,7 +169,7 @@ async def run_notifications_once(bot: Bot) -> None:
                         await send_message_with_retry(bot, int(client_id), txt, context=f"escal11_client:{assignment_id}")
                     mark_assignment_event(int(assignment_id), "escalation_11h_sent_at")
                     mark_assignment_event(int(assignment_id), "no_confirm_flagged_at")
-                if reminder_3h_sent_at is None and 0 < to_start <= 3 * 3600:
+                if reminder_3h_sent_at is None and _in_window(to_start, 3 * 3600):
                     await send_message_with_retry(
                         bot,
                         int(worker_id),
@@ -168,7 +178,11 @@ async def run_notifications_once(bot: Bot) -> None:
                         context=f"rem3:{assignment_id}",
                     )
                     mark_assignment_event(int(assignment_id), "reminder_3h_sent_at")
-                if escalation_1h_sent_at is None and 0 < to_start <= 3600:
+                if (
+                    escalation_1h_sent_at is None
+                    and reminder_3h_sent_at is not None
+                    and _in_window(to_start, 3600)
+                ):
                     txt = (
                         f"⚠️ Исполнитель {worker_name or worker_id} не подтвердил выход на смену #{shift_id}. "
                         f"Старт: {format_date_ru(str(shift_date))} {start_time}."
@@ -191,7 +205,7 @@ async def run_notifications_once(bot: Bot) -> None:
             if (
                 status == "confirmed"
                 and confirmed_shift_12h_reminder_sent_at is None
-                and 3 * 3600 < to_start <= 12 * 3600
+                and _in_window(to_start, 12 * 3600)
             ):
                 h, m = int(to_start // 3600), int((to_start % 3600) // 60)
                 await send_message_with_retry(
@@ -217,7 +231,7 @@ async def run_notifications_once(bot: Bot) -> None:
             if (
                 status == "confirmed"
                 and confirmed_shift_3h_reminder_sent_at is None
-                and 0 < to_start <= 3 * 3600
+                and _in_window(to_start, 3 * 3600)
             ):
                 h, m = int(to_start // 3600), int((to_start % 3600) // 60)
                 await send_message_with_retry(

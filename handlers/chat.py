@@ -1,9 +1,9 @@
 # handlers/chat.py
-from aiogram import Router, F, types
+from aiogram import Router, F, types, Bot
 from aiogram.fsm.context import FSMContext
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-from config import is_admin_user
+from config import ADMIN_USER_IDS, is_admin_user
 from db import (
     save_chat_message,
     get_chat_messages,
@@ -17,12 +17,46 @@ from db import (
     get_project_chat_messages,
     client_owns_project,
     worker_assigned_to_project,
+    get_shift_with_owner,
 )
 from states import ChatMessageState, ProjectChatState
 
 from .telegram_edit import safe_edit_or_resend
 
 router = Router()
+
+
+async def _broadcast_shift_chat_message(
+    bot: Bot,
+    *,
+    shift_id: int,
+    sender_id: int,
+    display_name: str,
+    body: str,
+) -> None:
+    recipients: set[int] = set()
+    shift_owner = get_shift_with_owner(shift_id)
+    if shift_owner and shift_owner[7]:
+        recipients.add(int(shift_owner[7]))
+    for a in get_shift_assignments(shift_id):
+        recipients.add(int(a[2]))
+    for aid in ADMIN_USER_IDS:
+        recipients.add(int(aid))
+    recipients.discard(int(sender_id))
+
+    text = (
+        f"💬 Новое сообщение в чате смены #{shift_id}\n\n"
+        f"{display_name}:\n{body[:800]}"
+    )
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="Открыть чат смены", callback_data=f"chat_{shift_id}")]]
+    )
+    for rid in recipients:
+        try:
+            await bot.send_message(int(rid), text, parse_mode=None, reply_markup=kb)
+        except Exception:
+            # Неподписанный/заблокированный получатель не должен ломать отправку остальным.
+            continue
 
 
 def get_user_display_name(user_id: int) -> str:
@@ -233,5 +267,12 @@ async def send_chat_message(message: types.Message, state: FSMContext):
         await message.answer("Нужен текст сообщения (не стикер). Напишите ещё раз.")
         return
     save_chat_message(shift_id, user_id, display_name, body)
+    await _broadcast_shift_chat_message(
+        message.bot,
+        shift_id=int(shift_id),
+        sender_id=int(user_id),
+        display_name=display_name,
+        body=body,
+    )
     await message.answer("✅ Сообщение отправлено!")
     await state.clear()
