@@ -4,7 +4,7 @@ import math
 from datetime import datetime
 from datetime import timedelta
 
-from aiogram import Router, F, types
+from aiogram import Router, F, types, Bot
 from aiogram.fsm.context import FSMContext
 from aiogram.filters import StateFilter
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
@@ -1417,7 +1417,7 @@ def _render_report_text(shift_id: int, report: dict, tab: str, task_filter: str 
     return text
 
 
-async def _notify_shift_closed_summary(bot: types.Bot, shift_id: int, reason: str) -> None:
+async def _notify_shift_closed_summary(bot: Bot, shift_id: int, reason: str) -> None:
     """Отправляет автосводку при полном закрытии смены."""
     shift = get_shift(shift_id)
     if not shift or str(shift[7] or "") != "closed":
