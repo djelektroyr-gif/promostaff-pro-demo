@@ -164,14 +164,22 @@ async def run_notifications_once(bot: Bot) -> None:
                     and reminder_12h_sent_at is not None
                     and _in_window(to_start, 11 * 3600)
                 ):
-                    txt = (
+                    admin_txt = (
                         f"⚠️ Исполнитель {worker_name or worker_id} не подтвердил выход на смену #{shift_id} спустя 1 час после 12ч-уведомления. "
                         "Свяжитесь с исполнителем и уточните готовность к выходу."
                     )
+                    client_txt = (
+                        f"⚠️ По смене #{shift_id} пока нет подтверждения выхода исполнителя.\n"
+                        f"Дата и время: {format_date_ru(str(shift_date))} {start_time}–{end_time}."
+                    )
                     for aid in ADMIN_USER_IDS:
-                        await send_message_with_retry(bot, int(aid), txt, context=f"escal11_admin:{assignment_id}:{aid}")
+                        await send_message_with_retry(
+                            bot, int(aid), admin_txt, context=f"escal11_admin:{assignment_id}:{aid}"
+                        )
                     if client_id:
-                        await send_message_with_retry(bot, int(client_id), txt, context=f"escal11_client:{assignment_id}")
+                        await send_message_with_retry(
+                            bot, int(client_id), client_txt, context=f"escal11_client:{assignment_id}"
+                        )
                     mark_assignment_event(int(assignment_id), "escalation_11h_sent_at")
                     mark_assignment_event(int(assignment_id), "no_confirm_flagged_at")
                 if reminder_3h_sent_at is None and _in_window(to_start, 3 * 3600):
@@ -188,14 +196,22 @@ async def run_notifications_once(bot: Bot) -> None:
                     and reminder_3h_sent_at is not None
                     and _in_window(to_start, 3600)
                 ):
-                    txt = (
+                    admin_txt = (
                         f"⚠️ Исполнитель {worker_name or worker_id} не подтвердил выход на смену #{shift_id}. "
                         f"Старт: {format_date_ru(str(shift_date))} {start_time}."
                     )
+                    client_txt = (
+                        f"⚠️ До старта смены #{shift_id} менее часа, подтверждение выхода исполнителя пока не получено.\n"
+                        f"Дата и время: {format_date_ru(str(shift_date))} {start_time}–{end_time}."
+                    )
                     for aid in ADMIN_USER_IDS:
-                        await send_message_with_retry(bot, int(aid), txt, context=f"escal1_admin:{assignment_id}:{aid}")
+                        await send_message_with_retry(
+                            bot, int(aid), admin_txt, context=f"escal1_admin:{assignment_id}:{aid}"
+                        )
                     if client_id:
-                        await send_message_with_retry(bot, int(client_id), txt, context=f"escal1_client:{assignment_id}")
+                        await send_message_with_retry(
+                            bot, int(client_id), client_txt, context=f"escal1_client:{assignment_id}"
+                        )
                     await send_message_with_retry(
                         bot,
                         int(worker_id),
@@ -277,14 +293,22 @@ async def run_notifications_once(bot: Bot) -> None:
                 )
                 mark_assignment_event(int(assignment_id), "checkin_15m_sent_at")
             if status == "confirmed" and no_checkin_start_notified_at is None and to_start <= 0:
-                txt = (
+                admin_txt = (
                     f"⚠️ По смене #{shift_id} нет чек-ина к старту. "
                     f"Исполнитель {worker_name or worker_id} отмечается как опаздывающий."
                 )
+                client_txt = (
+                    f"⚠️ По смене #{shift_id} чек-ин исполнителя не выполнен вовремя.\n"
+                    "Мы зафиксировали это и контролируем ситуацию."
+                )
                 for aid in ADMIN_USER_IDS:
-                    await send_message_with_retry(bot, int(aid), txt, context=f"nocheckin_admin:{assignment_id}:{aid}")
+                    await send_message_with_retry(
+                        bot, int(aid), admin_txt, context=f"nocheckin_admin:{assignment_id}:{aid}"
+                    )
                 if client_id:
-                    await send_message_with_retry(bot, int(client_id), txt, context=f"nocheckin_client:{assignment_id}")
+                    await send_message_with_retry(
+                        bot, int(client_id), client_txt, context=f"nocheckin_client:{assignment_id}"
+                    )
                 await send_message_with_retry(
                     bot,
                     int(worker_id),

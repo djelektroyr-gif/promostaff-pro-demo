@@ -620,7 +620,6 @@ async def shift_detail(callback: types.CallbackQuery):
         f"📆 Дата: {format_date_ru(shift[2])}\n"
         f"⏰ Время: {shift[3]} — {shift[4]}\n"
         f"📍 Локация: {shift[5]}\n"
-        f"💰 Ставка: {shift[6]} ₽/час\n\n"
         f"👥 Назначенные исполнители:\n"
     )
 
@@ -1001,11 +1000,14 @@ async def checkin_photo_received(message: types.Message, state: FSMContext):
                     f"⚠️ Исполнитель {message.from_user.full_name} отметил чек-ин по смене #{shift_id} "
                     f"с опозданием на {max(delay_min, 1)} мин."
                 )
+                client_text = (
+                    f"⚠️ По смене #{shift_id} чек-ин исполнителя выполнен с опозданием примерно на {max(delay_min, 1)} мин."
+                )
                 try:
                     await send_all_admins(message.bot, late_text)
                     client_id = shift_owner[7]
                     if client_id:
-                        await message.bot.send_message(int(client_id), late_text)
+                        await message.bot.send_message(int(client_id), client_text)
                 except Exception as e:
                     logger.warning("late checkin notify shift_id=%s: %s", shift_id, e, exc_info=True)
         await message.answer(
@@ -1411,13 +1413,11 @@ def _render_report_text(shift_id: int, report: dict, tab: str, task_filter: str 
         f"📊 ОТЧЁТ ПО СМЕНЕ #{shift_id}\n\n"
         f"📆 {format_date_ru(shift[2])} | {shift[3]}-{shift[4]}\n"
         f"📍 {shift[5]}\n"
-        f"💰 Ставка: {shift[6]} ₽/час\n"
         f"SLA: {sla}\n\n"
     )
 
     if tab == "people":
         text = header + "👥 ИСПОЛНИТЕЛИ\n"
-        total_payment = 0.0
         tech_totals: dict[int, int] = {}
         for b in breaks:
             if str(b[3] or "") != "tech":
@@ -1431,8 +1431,6 @@ def _render_report_text(shift_id: int, report: dict, tab: str, task_filter: str 
             hours = float(a[9] or 0)
             billed_h = float(a[26] or hours) if len(a) > 26 else hours
             penalty_h = float(a[27] or 0) if len(a) > 27 else 0
-            payment = float(a[10] or 0)
-            total_payment += payment
             status = "✅" if a[A_STATUS] == "checked_out" else "⏳"
             name = _assign_worker_name(a)
             extra = f" (штраф {penalty_h:.1f} ч)" if penalty_h > 0 else ""
@@ -1440,8 +1438,7 @@ def _render_report_text(shift_id: int, report: dict, tab: str, task_filter: str 
             tech_total = tech_totals.get(int(a[2]), 0)
             if tech_total > 30:
                 tech_extra = f", ⚠️ тех. перерывы {tech_total} мин"
-            text += f"{status} {name}: факт {hours:.1f} ч, к оплате {billed_h:.1f} ч{extra}, {payment:.0f} ₽{tech_extra}\n"
-        text += f"\n💰 ИТОГО: {total_payment:.0f} ₽"
+            text += f"{status} {name}: факт {hours:.1f} ч, к зачёту {billed_h:.1f} ч{extra}{tech_extra}\n"
         return text
 
     if tab == "tasks":
