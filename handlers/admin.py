@@ -1158,7 +1158,7 @@ async def admin_shift_manage_list(callback: types.CallbackQuery):
     shifts = list_open_shifts_admin(30)
     if not shifts:
         await callback.message.edit_text(
-            "📅 Нет открытых смен.",
+            "📅 Нет активных смен (open/in_progress).",
             reply_markup=InlineKeyboardMarkup(
                 inline_keyboard=[[InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back")]]
             ),

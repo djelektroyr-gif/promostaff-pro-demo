@@ -985,7 +985,7 @@ def list_open_shifts_admin(limit: int = 30) -> list:
         SELECT s.id, s.shift_date, s.start_time, s.end_time, p.name, s.status
         FROM shifts s
         JOIN projects p ON s.project_id = p.id
-        WHERE s.status = 'open'
+        WHERE s.status IN ('open', 'in_progress')
         ORDER BY s.shift_date DESC
         LIMIT ?
     """,
