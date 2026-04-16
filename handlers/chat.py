@@ -8,6 +8,7 @@ from db import (
     save_chat_message,
     get_chat_messages,
     get_shift,
+    get_shift_assignments,
     get_worker,
     get_client,
     get_assignment,

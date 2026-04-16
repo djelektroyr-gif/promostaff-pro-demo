@@ -832,6 +832,17 @@ async def break_type_start(callback: types.CallbackQuery):
     if break_type == "lunch" and stats["lunch_count"] >= 1:
         await callback.answer("Обеденный перерыв можно взять только один раз за смену.", show_alert=True)
         return
+    if break_type == "lunch":
+        if not checkin_time or (now - checkin_time).total_seconds() < 2 * 3600:
+            await callback.answer("Обед доступен не раньше чем через 2 часа после чек-ина.", show_alert=True)
+            return
+        try:
+            _dt_start, dt_end = shift_start_end_local_naive(str(shift[2]), str(shift[3]), str(shift[4]))
+            if (dt_end - now).total_seconds() < 2 * 3600:
+                await callback.answer("Обед недоступен в последние 2 часа смены.", show_alert=True)
+                return
+        except Exception:
+            pass
     if break_type == "smoke":
         if not checkin_time or (now - checkin_time).total_seconds() < 3600:
             await callback.answer("Перекур доступен не раньше чем через 1 час после чек-ина.", show_alert=True)
