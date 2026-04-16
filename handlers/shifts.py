@@ -109,8 +109,29 @@ def _shift_geo_limits(shift: tuple | None) -> tuple[float | None, float | None, 
 
 
 def _shift_start(shift: tuple) -> datetime:
-    start, _ = shift_start_end_local_naive(str(shift[2]), str(shift[3]), str(shift[4]))
-    return start
+    # Поддерживаем оба формата:
+    # - get_shift():            (id, project_id, shift_date, start_time, end_time, ...)
+    # - get_shift_with_owner(): (id, shift_date, start_time, end_time, ...)
+    candidates = (
+        (1, 2, 3),  # get_shift_with_owner
+        (2, 3, 4),  # get_shift
+    )
+    for d_idx, s_idx, e_idx in candidates:
+        if len(shift) <= e_idx:
+            continue
+        shift_date = str(shift[d_idx] or "").strip()
+        start_time = str(shift[s_idx] or "").strip()
+        end_time = str(shift[e_idx] or "").strip()
+        if not shift_date or not start_time or not end_time:
+            continue
+        if "-" not in shift_date:
+            continue
+        try:
+            start, _ = shift_start_end_local_naive(shift_date, start_time, end_time)
+            return start
+        except Exception:
+            continue
+    raise ValueError(f"cannot parse shift start from row: {shift!r}")
 
 
 def _assignment_status_line(a: tuple) -> str:
