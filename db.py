@@ -1444,6 +1444,16 @@ def do_checkin(
             (ts, photo_url, checkin_lat, checkin_lng, shift_id, worker_id),
         )
     ok = cur.rowcount > 0
+    if ok:
+        # Первый успешный чек-ин переводит смену в процесс.
+        cur.execute(
+            """
+            UPDATE shifts
+            SET status = 'in_progress'
+            WHERE id = ? AND status = 'open'
+            """,
+            (shift_id,),
+        )
     conn.commit()
     conn.close()
     return ok
@@ -1538,6 +1548,35 @@ def do_checkout(shift_id: int, worker_id: int, photo_url: str | None = None) -> 
         ),
     )
     ok = cur.rowcount > 0
+    if ok:
+        # Автозакрытие смены: если не осталось активных назначений.
+        cur.execute(
+            """
+            SELECT COUNT(*)
+            FROM assignments
+            WHERE shift_id = ? AND status NOT IN ('checked_out', 'cancelled')
+            """,
+            (shift_id,),
+        )
+        active_left = int(cur.fetchone()[0] or 0)
+        if active_left == 0:
+            cur.execute(
+                """
+                UPDATE shifts
+                SET status = 'closed'
+                WHERE id = ? AND status != 'closed'
+                """,
+                (shift_id,),
+            )
+        else:
+            cur.execute(
+                """
+                UPDATE shifts
+                SET status = 'in_progress'
+                WHERE id = ? AND status = 'open'
+                """,
+                (shift_id,),
+            )
     conn.commit()
     conn.close()
     return ok

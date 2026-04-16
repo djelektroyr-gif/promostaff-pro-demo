@@ -1055,6 +1055,7 @@ async def checkout_photo_received(message: types.Message, state: FSMContext):
             "✅ " + bold("Смена завершена!") + " " + em("Спасибо за работу!"),
             parse_mode=PARSE_MODE_TELEGRAM,
         )
+        await _notify_shift_closed_summary(message.bot, int(shift_id), "чек-аут исполнителя")
         await state.clear()
     except Exception:
         logger.exception(
@@ -1088,6 +1089,7 @@ async def forgot_close_shift(callback: types.CallbackQuery):
     if not ok:
         await callback.answer("Не удалось закрыть смену (нет чек-ина или уже закрыта).", show_alert=True)
         return
+    await _notify_shift_closed_summary(callback.bot, shift_id, "принудительное закрытие исполнителем")
     await safe_edit_or_resend(callback, "✅ Смена закрыта. Спасибо!")
     await callback.answer()
 
@@ -1173,6 +1175,7 @@ async def admin_extension_reject(callback: types.CallbackQuery):
     resolve_extension_request(shift_id, worker_id, approved=False)
     closed = do_checkout(shift_id, worker_id, None)
     if closed:
+        await _notify_shift_closed_summary(callback.bot, shift_id, "отклонено продление администратором")
         await callback.bot.send_message(
             worker_id,
             f"❌ Продление на {minutes} минут отклонено. Смена #{shift_id} закрыта.",
@@ -1412,6 +1415,29 @@ def _render_report_text(shift_id: int, report: dict, tab: str, task_filter: str 
         text += f"• {name}: суммарно {total_m} мин\n"
     text += "\nПерерывы фиксируются для контроля; в расчёт оплаты пока не вычитаются."
     return text
+
+
+async def _notify_shift_closed_summary(bot: types.Bot, shift_id: int, reason: str) -> None:
+    """Отправляет автосводку при полном закрытии смены."""
+    shift = get_shift(shift_id)
+    if not shift or str(shift[7] or "") != "closed":
+        return
+    report = get_shift_report(shift_id)
+    if not report.get("shift"):
+        return
+    summary = _render_report_text(shift_id, report, "people")
+    body = f"✅ Смена #{shift_id} закрыта ({reason}).\n\n{summary}"
+    try:
+        await send_all_admins(bot, body, parse_mode=None)
+    except Exception as e:
+        logger.warning("auto summary to admins failed shift_id=%s: %s", shift_id, e, exc_info=True)
+    try:
+        shift_owner = get_shift_with_owner(shift_id)
+        client_id = int(shift_owner[7]) if shift_owner and shift_owner[7] else None
+        if client_id:
+            await bot.send_message(client_id, body, parse_mode=None)
+    except Exception as e:
+        logger.warning("auto summary to client failed shift_id=%s: %s", shift_id, e, exc_info=True)
 
 
 @router.callback_query(F.data.startswith("report_share_"))
