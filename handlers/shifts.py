@@ -1130,7 +1130,15 @@ async def checkout_photo_received(message: types.Message, state: FSMContext):
             "✅ " + bold("Смена завершена!") + " " + em("Спасибо за работу!"),
             parse_mode=PARSE_MODE_TELEGRAM,
         )
-        await _notify_shift_closed_summary(message.bot, int(shift_id), "чек-аут исполнителя")
+        shift_after = get_shift(int(shift_id))
+        if shift_after and str(shift_after[7] or "") == "closed":
+            await _notify_shift_closed_summary(message.bot, int(shift_id), "чек-аут исполнителя")
+        else:
+            await _notify_admins_checkout_partial(
+                message.bot,
+                int(shift_id),
+                message.from_user.full_name or str(message.from_user.id),
+            )
         await state.clear()
     except Exception:
         logger.exception(
@@ -1164,7 +1172,15 @@ async def forgot_close_shift(callback: types.CallbackQuery):
     if not ok:
         await callback.answer("Не удалось закрыть смену (нет чек-ина или уже закрыта).", show_alert=True)
         return
-    await _notify_shift_closed_summary(callback.bot, shift_id, "принудительное закрытие исполнителем")
+    shift_after = get_shift(int(shift_id))
+    if shift_after and str(shift_after[7] or "") == "closed":
+        await _notify_shift_closed_summary(callback.bot, shift_id, "принудительное закрытие исполнителем")
+    else:
+        await _notify_admins_checkout_partial(
+            callback.bot,
+            shift_id,
+            callback.from_user.full_name or str(callback.from_user.id),
+        )
     await safe_edit_or_resend(callback, "✅ Смена закрыта. Спасибо!")
     await callback.answer()
 
@@ -1393,7 +1409,14 @@ def _report_tabs_keyboard(shift_id: int, tab: str, task_filter: str = "all") -> 
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def _render_report_text(shift_id: int, report: dict, tab: str, task_filter: str = "all") -> str:
+def _render_report_text(
+    shift_id: int,
+    report: dict,
+    tab: str,
+    task_filter: str = "all",
+    *,
+    include_financials: bool = False,
+) -> str:
     shift = report["shift"]
     tasks = report.get("tasks") or []
     assignments = report.get("assignments") or []
@@ -1409,15 +1432,18 @@ def _render_report_text(shift_id: int, report: dict, tab: str, task_filter: str 
     else:
         sla = "🟡 внимание"
 
+    rate_line = f"💰 Ставка: {shift[6]} ₽/час\n" if include_financials else ""
     header = (
         f"📊 ОТЧЁТ ПО СМЕНЕ #{shift_id}\n\n"
         f"📆 {format_date_ru(shift[2])} | {shift[3]}-{shift[4]}\n"
         f"📍 {shift[5]}\n"
+        f"{rate_line}"
         f"SLA: {sla}\n\n"
     )
 
     if tab == "people":
         text = header + "👥 ИСПОЛНИТЕЛИ\n"
+        total_payment = 0.0
         tech_totals: dict[int, int] = {}
         for b in breaks:
             if str(b[3] or "") != "tech":
@@ -1431,6 +1457,9 @@ def _render_report_text(shift_id: int, report: dict, tab: str, task_filter: str 
             hours = float(a[9] or 0)
             billed_h = float(a[26] or hours) if len(a) > 26 else hours
             penalty_h = float(a[27] or 0) if len(a) > 27 else 0
+            payment = float(a[10] or 0)
+            if include_financials:
+                total_payment += payment
             status = "✅" if a[A_STATUS] == "checked_out" else "⏳"
             name = _assign_worker_name(a)
             extra = f" (штраф {penalty_h:.1f} ч)" if penalty_h > 0 else ""
@@ -1438,7 +1467,13 @@ def _render_report_text(shift_id: int, report: dict, tab: str, task_filter: str 
             tech_total = tech_totals.get(int(a[2]), 0)
             if tech_total > 30:
                 tech_extra = f", ⚠️ тех. перерывы {tech_total} мин"
-            text += f"{status} {name}: факт {hours:.1f} ч, к зачёту {billed_h:.1f} ч{extra}{tech_extra}\n"
+            pay_seg = f", {payment:.0f} ₽" if include_financials else ""
+            text += (
+                f"{status} {name}: факт {hours:.1f} ч, "
+                f"{'к оплате' if include_financials else 'к зачёту'} {billed_h:.1f} ч{extra}{pay_seg}{tech_extra}\n"
+            )
+        if include_financials:
+            text += f"\n💰 ИТОГО: {total_payment:.0f} ₽"
         return text
 
     if tab == "tasks":
@@ -1501,6 +1536,29 @@ def _render_report_text(shift_id: int, report: dict, tab: str, task_filter: str 
     return text
 
 
+async def _notify_admins_checkout_partial(bot: Bot, shift_id: int, worker_label: str) -> None:
+    """Уведомление админов о чек-ауте одного исполнителя, пока смена целиком не закрыта."""
+    shift_row = get_shift(int(shift_id))
+    if not shift_row or str(shift_row[7] or "") == "closed":
+        return
+    try:
+        await send_all_admins(
+            bot,
+            f"✅ Чек-аут по смене #{shift_id}\n"
+            f"Исполнитель: {worker_label}\n\n"
+            "Смена в системе ещё не закрыта полностью (есть другие назначения). "
+            "Итоговый отчёт уйдёт администраторам и заказчику, когда все исполнители завершат смену.",
+            parse_mode=None,
+        )
+    except Exception as e:
+        logger.warning(
+            "notify admins partial checkout shift_id=%s: %s",
+            shift_id,
+            e,
+            exc_info=True,
+        )
+
+
 async def _notify_shift_closed_summary(bot: Bot, shift_id: int, reason: str) -> None:
     """Отправляет автосводку при полном закрытии смены."""
     shift = get_shift(shift_id)
@@ -1509,15 +1567,21 @@ async def _notify_shift_closed_summary(bot: Bot, shift_id: int, reason: str) -> 
     report = get_shift_report(shift_id)
     if not report.get("shift"):
         return
-    summary = _render_report_text(shift_id, report, "people")
-    body = f"✅ Смена #{shift_id} закрыта ({reason}).\n\n{summary}"
+    summary_client = _render_report_text(shift_id, report, "people", include_financials=False)
+    summary_admin = _render_report_text(shift_id, report, "people", include_financials=True)
+    body_client = f"✅ Смена #{shift_id} закрыта ({reason}).\n\n{summary_client}"
+    body_admin = f"✅ Смена #{shift_id} закрыта ({reason}).\n\n{summary_admin}"
     try:
         shift_owner = get_shift_with_owner(shift_id)
         client_id = int(shift_owner[7]) if shift_owner and shift_owner[7] else None
         if client_id:
-            await bot.send_message(client_id, body, parse_mode=None)
+            await bot.send_message(client_id, body_client, parse_mode=None)
     except Exception as e:
         logger.warning("auto summary to client failed shift_id=%s: %s", shift_id, e, exc_info=True)
+    try:
+        await send_all_admins(bot, body_admin, parse_mode=None)
+    except Exception as e:
+        logger.warning("auto summary to admins failed shift_id=%s: %s", shift_id, e, exc_info=True)
 
 
 @router.callback_query(F.data.startswith("report_share_"))
